@@ -2152,6 +2152,105 @@ func TestUpdateSettingsRejectsAutoResetCreditsWindowOutOfRange(t *testing.T) {
 	}
 }
 
+func TestUpdateSettingsRejectsCodexPriorityServiceTierRatioOutOfRange(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := &Handler{}
+
+	for _, value := range []float64{-0.01, 1.01} {
+		recorder := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(recorder)
+		body := fmt.Sprintf(`{"codex_priority_service_tier_min_remaining_ratio":%v}`, value)
+		ctx.Request = httptest.NewRequest(http.MethodPut, "/api/admin/settings", strings.NewReader(body))
+		ctx.Request.Header.Set("Content-Type", "application/json")
+
+		handler.UpdateSettings(ctx)
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("value=%v status=%d, want %d body=%s", value, recorder.Code, http.StatusBadRequest, recorder.Body.String())
+		}
+	}
+}
+
+func TestUpdateSettingsPersistsCodexPriorityServiceTierRatio(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	previousRuntime := proxy.CurrentRuntimeSettings()
+	t.Cleanup(func() { proxy.ApplyRuntimeSettings(previousRuntime) })
+
+	db := newTestAdminDB(t)
+	tc := cache.NewMemory(4)
+	t.Cleanup(func() { _ = tc.Close() })
+	settings := defaultBootstrapSettings()
+	if err := db.UpdateSystemSettings(context.Background(), settings); err != nil {
+		t.Fatalf("seed settings: %v", err)
+	}
+	store := auth.NewStore(db, tc, settings)
+	t.Cleanup(store.Stop)
+	proxy.ApplyRuntimeSettingsFromSystem(settings)
+	handler := NewHandler(store, db, tc, proxy.NewRateLimiter(settings.GlobalRPM), "admin-secret")
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPut, "/api/admin/settings", strings.NewReader(`{"codex_priority_service_tier_enabled":true,"codex_priority_service_tier_min_remaining_ratio":0.8}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	handler.UpdateSettings(ctx)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+
+	var response settingsResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode settings response: %v", err)
+	}
+	if !response.CodexPriorityServiceTierEnabled || response.CodexPriorityMinRemainingRatio != 0.8 {
+		t.Fatalf("response auto Fast settings = (%t,%v), want (true,0.8)", response.CodexPriorityServiceTierEnabled, response.CodexPriorityMinRemainingRatio)
+	}
+
+	persisted, err := db.GetSystemSettings(context.Background())
+	if err != nil {
+		t.Fatalf("GetSystemSettings: %v", err)
+	}
+	if persisted == nil || !persisted.CodexPriorityServiceTierEnabled || persisted.CodexPriorityMinRemainingRatio != 0.8 {
+		t.Fatalf("persisted auto Fast settings = %#v, want enabled ratio 0.8", persisted)
+	}
+	current := proxy.CurrentRuntimeSettings()
+	if !current.CodexPriorityServiceTierEnabled || current.CodexPriorityMinRemainingRatio != 0.8 {
+		t.Fatalf("runtime auto Fast settings = (%t,%v), want (true,0.8)", current.CodexPriorityServiceTierEnabled, current.CodexPriorityMinRemainingRatio)
+	}
+
+	for _, update := range []struct {
+		body        string
+		wantEnabled bool
+		wantRatio   float64
+	}{
+		{body: `{"codex_priority_service_tier_min_remaining_ratio":0}`, wantEnabled: true, wantRatio: 0},
+		{body: `{"codex_priority_service_tier_enabled":false}`, wantEnabled: false, wantRatio: 0},
+	} {
+		recorder = httptest.NewRecorder()
+		ctx, _ = gin.CreateTestContext(recorder)
+		ctx.Request = httptest.NewRequest(http.MethodPut, "/api/admin/settings", strings.NewReader(update.body))
+		ctx.Request.Header.Set("Content-Type", "application/json")
+		handler.UpdateSettings(ctx)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("body=%s status=%d, want %d response=%s", update.body, recorder.Code, http.StatusOK, recorder.Body.String())
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+			t.Fatalf("decode partial update response: %v", err)
+		}
+		if response.CodexPriorityServiceTierEnabled != update.wantEnabled || response.CodexPriorityMinRemainingRatio != update.wantRatio {
+			t.Fatalf("body=%s response auto Fast settings = (%t,%v), want (%t,%v)", update.body, response.CodexPriorityServiceTierEnabled, response.CodexPriorityMinRemainingRatio, update.wantEnabled, update.wantRatio)
+		}
+	}
+
+	persisted, err = db.GetSystemSettings(context.Background())
+	if err != nil {
+		t.Fatalf("GetSystemSettings after partial updates: %v", err)
+	}
+	current = proxy.CurrentRuntimeSettings()
+	if persisted == nil || persisted.CodexPriorityServiceTierEnabled || persisted.CodexPriorityMinRemainingRatio != 0 || current.CodexPriorityServiceTierEnabled || current.CodexPriorityMinRemainingRatio != 0 {
+		t.Fatalf("partial update result persisted=%#v runtime=(%t,%v), want disabled ratio 0", persisted, current.CodexPriorityServiceTierEnabled, current.CodexPriorityMinRemainingRatio)
+	}
+}
+
 func TestUpdateSettingsDoesNotEnableAutoResetCreditsWhenPersistenceFails(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -2171,7 +2270,7 @@ func TestUpdateSettingsDoesNotEnableAutoResetCreditsWhenPersistenceFails(t *test
 	cancel()
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
-	request := httptest.NewRequest(http.MethodPut, "/api/admin/settings", strings.NewReader(`{"auto_reset_credits_enabled":true}`))
+	request := httptest.NewRequest(http.MethodPut, "/api/admin/settings", strings.NewReader(`{"auto_reset_credits_enabled":true,"codex_priority_service_tier_enabled":true,"codex_priority_service_tier_min_remaining_ratio":0.8}`))
 	ctx.Request = request.WithContext(requestCtx)
 	ctx.Request.Header.Set("Content-Type", "application/json")
 
@@ -2179,8 +2278,8 @@ func TestUpdateSettingsDoesNotEnableAutoResetCreditsWhenPersistenceFails(t *test
 	if recorder.Code != http.StatusInternalServerError {
 		t.Fatalf("status=%d, want %d body=%s", recorder.Code, http.StatusInternalServerError, recorder.Body.String())
 	}
-	if current := proxy.CurrentRuntimeSettings(); current.AutoResetCreditsEnabled {
-		t.Fatal("AutoResetCreditsEnabled became true after persistence failure")
+	if current := proxy.CurrentRuntimeSettings(); current.AutoResetCreditsEnabled || current.CodexPriorityServiceTierEnabled || current.CodexPriorityMinRemainingRatio != 0.5 {
+		t.Fatalf("runtime settings changed after persistence failure: auto_reset=%t auto_fast=%t ratio=%v", current.AutoResetCreditsEnabled, current.CodexPriorityServiceTierEnabled, current.CodexPriorityMinRemainingRatio)
 	}
 }
 
@@ -2231,6 +2330,8 @@ func TestAutoResetCreditsSettingsUseDatabaseAuthorityOnStaleInstance(t *testing.
 	settings := defaultBootstrapSettings()
 	settings.AutoResetCreditsEnabled = false
 	settings.AutoResetCreditsBeforeExpiryMin = 60
+	settings.CodexPriorityServiceTierEnabled = false
+	settings.CodexPriorityMinRemainingRatio = 0.2
 	if err := db.UpdateSystemSettings(context.Background(), settings); err != nil {
 		t.Fatalf("seed settings: %v", err)
 	}
@@ -2241,6 +2342,8 @@ func TestAutoResetCreditsSettingsUseDatabaseAuthorityOnStaleInstance(t *testing.
 	staleRuntime := proxy.DefaultRuntimeSettings()
 	staleRuntime.AutoResetCreditsEnabled = true
 	staleRuntime.AutoResetCreditsBeforeExpiryMin = 90
+	staleRuntime.CodexPriorityServiceTierEnabled = true
+	staleRuntime.CodexPriorityMinRemainingRatio = 0.8
 	proxy.ApplyRuntimeSettings(staleRuntime)
 
 	getRecorder := httptest.NewRecorder()
@@ -2256,6 +2359,9 @@ func TestAutoResetCreditsSettingsUseDatabaseAuthorityOnStaleInstance(t *testing.
 	}
 	if response.AutoResetCreditsEnabled || response.AutoResetCreditsBeforeExpiryMin != 60 {
 		t.Fatalf("GET auto settings=(%v,%d), want DB authority (false,60)", response.AutoResetCreditsEnabled, response.AutoResetCreditsBeforeExpiryMin)
+	}
+	if response.CodexPriorityServiceTierEnabled || response.CodexPriorityMinRemainingRatio != 0.2 {
+		t.Fatalf("GET auto Fast settings=(%t,%v), want DB authority (false,0.2)", response.CodexPriorityServiceTierEnabled, response.CodexPriorityMinRemainingRatio)
 	}
 
 	updateRecorder := httptest.NewRecorder()
@@ -2274,9 +2380,15 @@ func TestAutoResetCreditsSettingsUseDatabaseAuthorityOnStaleInstance(t *testing.
 	if persisted.AutoResetCreditsEnabled || persisted.AutoResetCreditsBeforeExpiryMin != 60 {
 		t.Fatalf("persisted auto settings=(%v,%d), want (false,60)", persisted.AutoResetCreditsEnabled, persisted.AutoResetCreditsBeforeExpiryMin)
 	}
+	if persisted.CodexPriorityServiceTierEnabled || persisted.CodexPriorityMinRemainingRatio != 0.2 {
+		t.Fatalf("persisted auto Fast settings=(%t,%v), want (false,0.2)", persisted.CodexPriorityServiceTierEnabled, persisted.CodexPriorityMinRemainingRatio)
+	}
 	current := proxy.CurrentRuntimeSettings()
 	if current.AutoResetCreditsEnabled || current.AutoResetCreditsBeforeExpiryMin != 60 {
 		t.Fatalf("runtime auto settings=(%v,%d), want refreshed DB authority (false,60)", current.AutoResetCreditsEnabled, current.AutoResetCreditsBeforeExpiryMin)
+	}
+	if current.CodexPriorityServiceTierEnabled || current.CodexPriorityMinRemainingRatio != 0.2 {
+		t.Fatalf("runtime auto Fast settings=(%t,%v), want refreshed DB authority (false,0.2)", current.CodexPriorityServiceTierEnabled, current.CodexPriorityMinRemainingRatio)
 	}
 	select {
 	case <-handler.autoResetCreditsWake:

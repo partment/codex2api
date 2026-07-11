@@ -242,7 +242,11 @@
     "claudeMaxToolCount": "最大工具數量",
     "claudeMaxToolCountDesc": "0 表示不設閘道工具數量上限；非 0 用於營運側資源保護。",
     "claudeMaxToolSchemaBytes": "工具 Schema 上限",
-    "claudeMaxToolSchemaBytesDesc": "0 表示不設閘道 Schema 上限；請求體仍受系統大小與上游限制。"
+    "claudeMaxToolSchemaBytesDesc": "0 表示不設閘道 Schema 上限；請求體仍受系統大小與上游限制。",
+    "codexPriorityServiceTier": "高餘額自動 Fast",
+    "codexPriorityServiceTierDesc": "帳號排程後，Codex 文字模型在有效額度視窗達到設定的最低剩餘額度時自動使用 Fast。已知不相容的模型會被排除，Payload Rules 可覆寫此值。",
+    "codexPriorityServiceTierMinRemainingRatio": "自動 Fast 最低剩餘額度",
+    "codexPriorityServiceTierMinRemainingRatioDesc": "有效的長週期額度，以及存在時的 5 小時視窗，都必須至少剩餘此比例。範圍 0-100%，預設 50%。"
   },
   "promptFilter": {
     "views": {

@@ -1546,6 +1546,8 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 		h.AcquireAPIKeyScopeConcurrency(c, account)
 		start := time.Now()
 		proxyURL := h.resolveProxyForAttempt(account, stickyProxyURL)
+		upstreamBody := applyQuotaPriorityServiceTier(account, responsesBody, h.store.GetUsageProbeMaxAge())
+		serviceTier := extractServiceTier(upstreamBody)
 		apiKey := strings.TrimSpace(strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer "))
 		deviceCfg := h.deviceCfg
 		if deviceCfg == nil {
@@ -1553,7 +1555,7 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 		}
 
 		resp, reqErr := executeHTTPWithContinuousRetryKeepalive(c.Request.Context(), func() (*http.Response, error) {
-			return ExecuteRequest(c.Request.Context(), account, responsesBody, "", proxyURL, apiKey, deviceCfg, c.Request.Header.Clone(), false)
+			return ExecuteRequest(c.Request.Context(), account, upstreamBody, "", proxyURL, apiKey, deviceCfg, c.Request.Header.Clone(), false)
 		})
 		durationMs := int(time.Since(start).Milliseconds())
 		if reqErr != nil {
@@ -1615,6 +1617,7 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 			decision := h.applyCooldownForModel(account, resp.StatusCode, errBody, resp, requestModel)
 			continuousSelected := continuousRetryHTTPSelected(continuousRetryPolicy, resp.StatusCode, errBody)
 			shouldRetry := retryAllowedByEndpointCap(attempt, maxImageAttempts, continuousSelected) && shouldRetryHTTPStatus(resp.StatusCode, errBody, &generalRetries, &rateLimitRetries, maxRetries, maxRateLimitRetries, continuousRetryPolicy)
+			usageTiers := resolveUsageServiceTiers("", serviceTier)
 			h.logUsageForRequest(c, &database.UsageLogInput{
 				AccountID:              account.ID(),
 				Endpoint:               inboundEndpoint,
@@ -1624,6 +1627,10 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 				DurationMs:             durationMs,
 				InboundEndpoint:        inboundEndpoint,
 				UpstreamEndpoint:       "/v1/responses",
+				ServiceTier:            usageTiers.ServiceTier,
+				RequestedServiceTier:   usageTiers.RequestedServiceTier,
+				ActualServiceTier:      usageTiers.ActualServiceTier,
+				BillingServiceTier:     usageTiers.BillingServiceTier,
 				Stream:                 stream,
 				IsRetryAttempt:         shouldRetry,
 				AttemptIndex:           attempt + 1,
@@ -1706,6 +1713,7 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 				// Always record the failed attempt so it appears in usage stats,
 				// matching the chat completions error path.
 				failedLog := buildImageErrorUsageLog(account, inboundEndpoint, logModel, logEffectiveModel, stream, int(time.Since(start).Milliseconds()), attempt, willRetry, readErr, usage, imageLogInfo)
+				applyRequestedServiceTierToUsageLog(failedLog, serviceTier)
 				failedLog.PromptPolicyIncidentID = promptPolicyIncidentID
 				if promptPolicyIncidentID != "" {
 					failedLog.UpstreamErrorKind = "cyber_policy"
@@ -1776,6 +1784,7 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 				failedLog.UpstreamErrorKind = "local"
 				failedLog.ErrorMessage = usageLogFailureMessage(http.StatusInternalServerError, continuousRetryLocalFailureMessage)
 			}
+			applyRequestedServiceTierToUsageLog(failedLog, serviceTier)
 			failedLog.PromptPolicyIncidentID = promptPolicyIncidentID
 			if promptPolicyIncidentID != "" {
 				failedLog.UpstreamErrorKind = "cyber_policy"
@@ -1870,6 +1879,7 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 			UpstreamEndpoint: "/v1/responses",
 			Stream:           stream,
 		}
+		applyRequestedServiceTierToUsageLog(logInput, serviceTier)
 		if usage != nil {
 			logInput.PromptTokens = usage.PromptTokens
 			logInput.CompletionTokens = usage.CompletionTokens
@@ -1940,6 +1950,17 @@ func buildImageErrorUsageLog(account *auth.Account, inboundEndpoint, logModel, l
 	}
 	applyImageUsageLogInfo(logInput, imageLogInfo)
 	return logInput
+}
+
+func applyRequestedServiceTierToUsageLog(logInput *database.UsageLogInput, requestedTier string) {
+	if logInput == nil {
+		return
+	}
+	tiers := resolveUsageServiceTiers("", requestedTier)
+	logInput.ServiceTier = tiers.ServiceTier
+	logInput.RequestedServiceTier = tiers.RequestedServiceTier
+	logInput.ActualServiceTier = tiers.ActualServiceTier
+	logInput.BillingServiceTier = tiers.BillingServiceTier
 }
 
 // shouldRetryImageStreamError determines whether an image generation stream

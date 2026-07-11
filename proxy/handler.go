@@ -3936,6 +3936,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		}
 		attemptEffectiveModel := effectiveModel
 		attemptLogEffectiveModel := logEffectiveModel
+		serviceTier := extractServiceTier(codexBody)
 		// relay/Grok 账号走 HTTP 执行器（下方 IsRelayStyle 分支优先于 WS），这里同步排除，
 		// 避免日志把 relay 请求错标成 via_websocket。
 		useWebsocket := h.shouldUseWebsocketForHTTP() && !wsHTTPFallback.ForceHTTP() && !account.IsRelayStyle()
@@ -4751,6 +4752,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		if useWebsocket {
 			upstreamBody = stripResponsesImageGenerationTool(codexBody)
 		}
+		upstreamBody = applyQuotaPriorityServiceTier(account, upstreamBody, h.store.GetUsageProbeMaxAge())
 		// service_tier 记账按 payload 规则改写后的值归因（覆写 service_tier 的规则才生效）。
 		// 按尝试重算：不同尝试的生效模型/账号可能不同，规则按模型或账号门匹配则结果随之变化。
 		serviceTier = EffectiveRequestedServiceTier(upstreamBody, attemptEffectiveModel, downstreamHeaders, attemptIdentity)
@@ -5867,6 +5869,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		}
 		attemptEffectiveModel := effectiveModel
 		attemptLogEffectiveModel := logEffectiveModel
+		serviceTier := extractServiceTier(codexBody)
 
 		apiKey := strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer ")
 		apiKey = strings.TrimSpace(apiKey)
@@ -6116,6 +6119,17 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		// compact（会话压缩续写）刻意保留确定性 IsolateCodexSessionID、不走 resolveUpstreamSessionID
 		// 的默认隔离：压缩本身是对同一会话的延续，需要稳定的 prompt_cache_key 维持缓存连续性。
 		upstreamSessionID := IsolateCodexSessionID(apiKeyID, sessionIdentity.upstreamSeed)
+		upstreamBody := applyQuotaPriorityServiceTier(account, codexBody, h.store.GetUsageProbeMaxAge())
+		// compact 仍不套用一般 Payload Rules 與身份門，但 service_tier 覆寫必須優先於
+		// 自動 Fast；只同步規則算出的 tier，避免意外改寫壓縮請求的其他欄位。
+		serviceTier = EffectiveRequestedServiceTier(upstreamBody, attemptEffectiveModel, downstreamHeaders, nil)
+		if serviceTier == "" {
+			upstreamBody, _ = sjson.DeleteBytes(upstreamBody, "service_tier")
+		} else {
+			upstreamBody, _ = sjson.SetBytes(upstreamBody, "service_tier", serviceTier)
+		}
+		upstreamBody = sanitizeServiceTierForUpstream(upstreamBody)
+
 		// compact_via_responses_enabled：上游已下线 /responses/compact 专用端点（404），
 		// 开启后官方账号改走 /responses + compaction_trigger 的 body-signal 形态
 		// （强制 HTTP SSE），成功后聚合回 compact 的一次性 JSON。
@@ -6125,9 +6139,9 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		var reqErr error
 		if compactViaResponses {
 			upstreamEndpointLabel = "/v1/responses"
-			resp, reqErr = ExecuteRequest(c.Request.Context(), account, appendCompactionTriggerToResponsesBody(codexBody), upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders, false)
+			resp, reqErr = ExecuteRequest(c.Request.Context(), account, appendCompactionTriggerToResponsesBody(upstreamBody), upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders, false)
 		} else {
-			resp, reqErr = ExecuteCompactRequest(c.Request.Context(), account, codexBody, upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders)
+			resp, reqErr = ExecuteCompactRequest(c.Request.Context(), account, upstreamBody, upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders)
 		}
 		durationMs := int(time.Since(start).Milliseconds())
 
@@ -6670,6 +6684,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		isRelayAccount := account.IsRelayStyle()
 		attemptEffectiveModel := effectiveModel
 		attemptLogEffectiveModel := logEffectiveModel
+		serviceTier := extractServiceTier(codexBody)
 		useWebsocket := h.shouldUseWebsocketForHTTP() && !wsHTTPFallback.ForceHTTP() && !isRelayAccount
 		// 真实生图意图强制走 HTTP：WebSocket 传输大体积图片数据会卡死（issue #220）。
 		// 仅凭注入的 image_generation 工具不触发降级，普通请求继续走 WS（issue #304）。
@@ -6708,13 +6723,6 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 
 		// 身份按 attempt 附加实际选中账号维度：account_* 门随重试换号重新匹配（issue #410）。
 		attemptIdentity := ruleIdentity.WithSelectedAccount(account, h.store)
-		// service_tier 记账按 payload 规则改写后的值归因（覆写 service_tier 的规则才生效）。
-		// 仅 Codex 路径（ExecuteRequest）套用规则；relay 账号不套用，保持原值。
-		// 按尝试重算：不同尝试的生效模型/账号可能不同，规则按模型或账号门匹配则结果随之变化。
-		if !isRelayAccount {
-			serviceTier = EffectiveRequestedServiceTier(codexBody, attemptEffectiveModel, downstreamHeaders, attemptIdentity)
-		}
-
 		upstreamSessionID := resolveUpstreamSessionID(apiKeyID, sessionIdentity.upstreamSeed, sessionIdentity.explicitUpstreamID, useWebsocket)
 		// 上游使用与客户端解耦的 context：客户端中途断开时仍能继续读完
 		// response.completed 拿到 usage（流式计费的关键）。
@@ -6754,6 +6762,9 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			if useWebsocket {
 				upstreamBody = stripResponsesImageGenerationTool(codexBody)
 			}
+			upstreamBody = applyQuotaPriorityServiceTier(account, upstreamBody, h.store.GetUsageProbeMaxAge())
+			// 按尝试重算：不同尝试的账号可能命中不同 payload 规则。
+			serviceTier = EffectiveRequestedServiceTier(upstreamBody, attemptEffectiveModel, downstreamHeaders, attemptIdentity)
 			resp, reqErr = executeHTTPWithContinuousRetryKeepalive(upstreamCtx, func() (*http.Response, error) {
 				return ExecuteRequest(upstreamCtx, account, upstreamBody, upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders, useWebsocket)
 			})

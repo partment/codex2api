@@ -2680,6 +2680,70 @@ func TestResponsesCompactCodexReadErrorRetryReturnsBadGatewayAndSyncsUsage(t *te
 	}
 }
 
+func TestResponsesCompactAutoFastHonorsPayloadRuleTierOverride(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	previousSettings := CurrentRuntimeSettings()
+	settings := previousSettings
+	settings.CodexPriorityServiceTierEnabled = true
+	ApplyRuntimeSettings(settings)
+	t.Cleanup(func() { ApplyRuntimeSettings(previousSettings) })
+	withPayloadRules(t, `{"override":[{"params":{"service_tier":"default"}}]}`)
+
+	previousResin := resinCfg.Load()
+	t.Cleanup(func() { resinCfg.Store(previousResin) })
+
+	var seenBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id":"resp_compact_auto_fast",
+			"object":"response",
+			"model":"gpt-5.4",
+			"output":[],
+			"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5},
+			"service_tier":"default"
+		}`))
+	}))
+	defer upstream.Close()
+	SetResinConfig(&ResinConfig{BaseURL: upstream.URL, PlatformName: "test"})
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{
+		MaxConcurrency:      1,
+		MaxRetries:          0,
+		MaxRateLimitRetries: 0,
+	})
+	account := &auth.Account{
+		DBID:        1,
+		AccessToken: "at-1",
+		Models:      []string{"gpt-5.4"},
+		PlanType:    "team",
+		Status:      auth.StatusReady,
+	}
+	now := time.Now()
+	account.SetUsageSnapshot(20, now)
+	account.SetReset7dAt(now.Add(6 * 24 * time.Hour))
+	store.AddAccount(account)
+	handler := NewHandler(store, nil, nil, nil)
+
+	body := []byte(`{"model":"gpt-5.4","input":"hello"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses/compact", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = req
+
+	handler.ResponsesCompact(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	if gjson.GetBytes(seenBody, "service_tier").Exists() {
+		t.Fatalf("payload rule default tier should override and sanitize auto Fast: %s", seenBody)
+	}
+}
+
 // newOpenAIResponsesSSEUpstream 模拟仅支持 OpenAI Responses API 的中转上游，
 // 返回一段最小可用的 Responses SSE 流（issue #181 回归用）。
 func newOpenAIResponsesSSEUpstream(seenPath *string, seenAuth *string, seenBody *[]byte) *httptest.Server {

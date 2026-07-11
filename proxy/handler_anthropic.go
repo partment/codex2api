@@ -750,9 +750,10 @@ func (h *Handler) Messages(c *gin.Context) {
 				return
 			}
 			// service_tier 记账按 payload 规则改写后的值归因（仅 Codex 路径套用规则）。
-			serviceTier = EffectiveRequestedServiceTier(codexBody, attemptEffectiveModel, downstreamHeaders, attemptIdentity)
+			upstreamBody := applyQuotaPriorityServiceTier(account, codexBody, h.store.GetUsageProbeMaxAge())
+			serviceTier = EffectiveRequestedServiceTier(upstreamBody, attemptEffectiveModel, downstreamHeaders, attemptIdentity)
 			resp, reqErr = executeHTTPWithContinuousRetryKeepalive(upstreamCtx, func() (*http.Response, error) {
-				return ExecuteRequest(upstreamCtx, account, codexBody, upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders, useWebsocket)
+				return ExecuteRequest(upstreamCtx, account, upstreamBody, upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders, useWebsocket)
 			})
 		}
 		durationMs := int(time.Since(start).Milliseconds())
