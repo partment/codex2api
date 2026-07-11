@@ -646,6 +646,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		if wsHTTPFallback.ForceHTTP() {
 			log.Printf("Responses WebSocket upstream HTTP fallback attempt started (fallback_id=%s, source=%s, attempt=%d, account=%d, ws_elapsed_ms=%d)", wsHTTPFallback.ID(), wsHTTPFallback.Source(), attempt+1, account.ID(), wsHTTPFallback.WSElapsed().Milliseconds())
 		}
+		serviceTier := extractServiceTier(codexBody)
 
 		apiKey := strings.TrimSpace(strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer "))
 		deviceCfg := h.deviceCfg
@@ -701,6 +702,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		if gjson.GetBytes(rawBody, "store").Type == gjson.False {
 			attemptReplay = nil
 		}
+		upstreamBody = applyQuotaPriorityServiceTier(account, upstreamBody, h.store.GetUsageProbeMaxAge())
 		// service_tier 记账按 payload 规则改写后的值归因（覆写 service_tier 的规则才生效）。
 		serviceTier = EffectiveRequestedServiceTier(upstreamBody, effectiveModel, downstreamHeaders, attemptIdentity)
 		// 在 useWebsocket 最终确定后再派生上游身份键：与 handler.go 的

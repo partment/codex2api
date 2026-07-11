@@ -71,12 +71,14 @@ type RuntimeSettings struct {
 	// CodexTelemetryTimingDebug 打开模拟遥测的临时计时探针（仅打日志，默认关闭）。
 	CodexTelemetryTimingDebug bool
 	// CodexImagesMainModel 为空时沿用环境变量或内置生图文本驱动模型。
-	CodexImagesMainModel  string
-	StreamFlushPolicy     string
-	StreamFlushIntervalMS int
-	FirstTokenMode        string
-	FirstTokenTimeoutSec  int
-	BillingTierPolicy     string
+	CodexImagesMainModel            string
+	StreamFlushPolicy               string
+	StreamFlushIntervalMS           int
+	FirstTokenMode                  string
+	FirstTokenTimeoutSec            int
+	BillingTierPolicy               string
+	CodexPriorityServiceTierEnabled bool
+	CodexPriorityMinRemainingRatio  float64
 	// ModelsListReadMaxBytes 是上游 /v1/models 与 Codex 模型清单成功响应的读取上限。
 	ModelsListReadMaxBytes int64
 	CodexForceWebsocket    bool // 强制 Codex 上游走 WebSocket（默认 false）
@@ -184,6 +186,7 @@ func DefaultRuntimeSettings() RuntimeSettings {
 		BillingTierPolicy:                defaultBillingTierPolicy,
 		ModelsListReadMaxBytes:           database.DefaultModelsListReadMaxBytes,
 		CodexRequestCompression:          defaultCodexRequestCompression,
+		CodexPriorityMinRemainingRatio:   database.DefaultCodexPriorityMinRemainingRatio,
 		CodexWSHideErrors:                defaultCodexWSHideErrors,
 		CodexWSSilentRetry:               defaultCodexWSSilentRetry,
 		CodexWSSilentRetries:             defaultCodexWSSilentRetries,
@@ -274,6 +277,7 @@ func NormalizeRuntimeSettings(settings RuntimeSettings) RuntimeSettings {
 	settings.FirstTokenMode = NormalizeFirstTokenMode(settings.FirstTokenMode)
 	settings.BillingTierPolicy = NormalizeBillingTierPolicy(settings.BillingTierPolicy)
 	settings.ModelsListReadMaxBytes = database.NormalizeModelsListReadMaxBytes(settings.ModelsListReadMaxBytes)
+	settings.CodexPriorityMinRemainingRatio = database.NormalizeCodexPriorityMinRemainingRatio(settings.CodexPriorityMinRemainingRatio)
 	settings.RequestIsolationMode = NormalizeRequestIsolationMode(settings.RequestIsolationMode)
 	settings.CodexImagesMainModel, _ = NormalizeImagesMainModel(settings.CodexImagesMainModel)
 	if strings.TrimSpace(settings.CodexMinCLIVersion) == "" {
@@ -355,6 +359,8 @@ func ApplyRuntimeSettingsFromSystem(settings *database.SystemSettings) RuntimeSe
 		next.FirstTokenTimeoutSec = settings.FirstTokenTimeoutSeconds
 		next.BillingTierPolicy = settings.BillingTierPolicy
 		next.ModelsListReadMaxBytes = settings.ModelsListReadMaxBytes
+		next.CodexPriorityServiceTierEnabled = settings.CodexPriorityServiceTierEnabled
+		next.CodexPriorityMinRemainingRatio = settings.CodexPriorityMinRemainingRatio
 		next.CodexForceWebsocket = settings.CodexForceWebsocket
 		next.CodexRequestCompression = settings.CodexRequestCompression
 		next.CodexWSWeakNetworkMode = settings.CodexWSWeakNetworkMode
