@@ -31,12 +31,18 @@ type autoResetCreditsScanStats struct {
 }
 
 type autoResetCreditsConfig struct {
-	Enabled         bool
-	BeforeExpiryMin int
+	ExpiryEnabled     bool
+	BeforeExpiryMin   int
+	LowBalanceEnabled bool
+	UsageMaxAge       time.Duration
 }
 
-// StartAutoResetCredits 启动主动重置次数的后台临期扫描。设置默认关闭；开启或修改
-// 提前时间时，UpdateSettings 会唤醒本循环立即扫描，之后每 5 分钟扫描一次。
+func (c autoResetCreditsConfig) anyEnabled() bool {
+	return c.ExpiryEnabled || c.LowBalanceEnabled
+}
+
+// StartAutoResetCredits 启动主动重置次数的后台自动消费扫描。设置默认关闭；开启或修改
+// 自动消费设置时，UpdateSettings 会唤醒本循环立即扫描，之后每 5 分钟扫描一次。
 func (h *Handler) StartAutoResetCredits(ctx context.Context) {
 	if h == nil || h.store == nil {
 		return
@@ -122,13 +128,13 @@ func (h *Handler) triggerAutoResetCreditsScan() {
 
 func (h *Handler) runAutoResetCreditsScan(ctx context.Context, now time.Time) autoResetCreditsScanStats {
 	settings, settingsErr := h.loadAutoResetCreditsConfig(ctx)
-	stats := autoResetCreditsScanStats{Enabled: settings.Enabled}
+	stats := autoResetCreditsScanStats{Enabled: settings.anyEnabled()}
 	if settingsErr != nil {
 		stats.Failed = 1
 		log.Printf("[auto-reset-credits] 读取系统设置失败，已跳过本轮扫描: %v", settingsErr)
 		return stats
 	}
-	if !settings.Enabled || h == nil || h.store == nil {
+	if !settings.anyEnabled() || h == nil || h.store == nil {
 		return stats
 	}
 
@@ -195,7 +201,11 @@ func (h *Handler) autoResetCreditsForAccount(ctx context.Context, account *auth.
 	if coolingDown {
 		return false, false, false, nil
 	}
-	if !settings.Enabled || !isAutoResetCreditsPlan(account.GetPlanType()) || strings.TrimSpace(account.GetAccessToken()) == "" {
+	if !settings.anyEnabled() || !isAutoResetCreditsPlan(account.GetPlanType()) || strings.TrimSpace(account.GetAccessToken()) == "" {
+		return false, false, false, nil
+	}
+	decisionNow := autoResetCreditsDecisionTime(now)
+	if !settings.ExpiryEnabled && !autoResetCreditsLowBalance(account, decisionNow, settings.UsageMaxAge) {
 		return false, false, false, nil
 	}
 
@@ -216,9 +226,7 @@ func (h *Handler) autoResetCreditsForAccount(ctx context.Context, account *auth.
 	if !isAutoResetCreditsPlan(account.GetPlanType()) || strings.TrimSpace(account.GetAccessToken()) == "" {
 		return true, false, false, nil
 	}
-	decisionNow := autoResetCreditsDecisionTime(now)
-	lead := time.Duration(settings.BeforeExpiryMin) * time.Minute
-	credit, expiresAt, ok := earliestAutoResetCredit(credits, decisionNow, lead)
+	credit, expiresAt, reason, ok := selectAutoResetCredit(credits, account, decisionNow, settings)
 	if !ok {
 		return true, false, false, nil
 	}
@@ -230,12 +238,11 @@ func (h *Handler) autoResetCreditsForAccount(ctx context.Context, account *auth.
 	if settingsErr != nil {
 		return true, true, false, fmt.Errorf("reload system settings before consume: %w", settingsErr)
 	}
-	if !settings.Enabled {
+	if !settings.anyEnabled() {
 		return true, true, false, nil
 	}
 	decisionNow = autoResetCreditsDecisionTime(now)
-	lead = time.Duration(settings.BeforeExpiryMin) * time.Minute
-	credit, expiresAt, ok = earliestAutoResetCredit(credits, decisionNow, lead)
+	credit, expiresAt, reason, ok = selectAutoResetCredit(credits, account, decisionNow, settings)
 	if !ok {
 		return true, true, false, nil
 	}
@@ -250,16 +257,20 @@ func (h *Handler) autoResetCreditsForAccount(ctx context.Context, account *auth.
 	if outcome.InProgress {
 		return true, true, false, nil
 	}
-	log.Printf("[auto-reset-credits] 账号 %d 临期额度已自动消耗: expires_at=%s windows_reset=%d remaining=%d",
-		account.DBID, expiresAt.UTC().Format(time.RFC3339), outcome.WindowsReset, outcome.Remaining)
+	log.Printf("[auto-reset-credits] 账号 %d 已自动消耗重置额度: reason=%s expires_at=%s windows_reset=%d remaining=%d",
+		account.DBID, reason, expiresAt.UTC().Format(time.RFC3339), outcome.WindowsReset, outcome.Remaining)
 	return true, true, true, nil
 }
 
 func (h *Handler) loadAutoResetCreditsConfig(ctx context.Context) (autoResetCreditsConfig, error) {
 	runtimeSettings := proxy.CurrentRuntimeSettings()
 	config := autoResetCreditsConfig{
-		Enabled:         runtimeSettings.AutoResetCreditsEnabled,
-		BeforeExpiryMin: runtimeSettings.AutoResetCreditsBeforeExpiryMin,
+		ExpiryEnabled:     runtimeSettings.AutoResetCreditsEnabled,
+		BeforeExpiryMin:   runtimeSettings.AutoResetCreditsBeforeExpiryMin,
+		LowBalanceEnabled: runtimeSettings.AutoResetCreditsLowBalanceEnabled,
+	}
+	if h != nil && h.store != nil {
+		config.UsageMaxAge = h.store.GetUsageProbeMaxAge()
 	}
 	if h == nil || h.db == nil {
 		return config, nil
@@ -269,11 +280,20 @@ func (h *Handler) loadAutoResetCreditsConfig(ctx context.Context) (autoResetCred
 		return autoResetCreditsConfig{}, err
 	}
 	if settings == nil {
-		return autoResetCreditsConfig{BeforeExpiryMin: proxy.DefaultRuntimeSettings().AutoResetCreditsBeforeExpiryMin}, nil
+		return autoResetCreditsConfig{
+			BeforeExpiryMin: proxy.DefaultRuntimeSettings().AutoResetCreditsBeforeExpiryMin,
+			UsageMaxAge:     config.UsageMaxAge,
+		}, nil
+	}
+	usageMaxAge := config.UsageMaxAge
+	if settings.UsageProbeMaxAgeMinutes > 0 {
+		usageMaxAge = time.Duration(settings.UsageProbeMaxAgeMinutes) * time.Minute
 	}
 	return autoResetCreditsConfig{
-		Enabled:         settings.AutoResetCreditsEnabled,
-		BeforeExpiryMin: settings.AutoResetCreditsBeforeExpiryMin,
+		ExpiryEnabled:     settings.AutoResetCreditsEnabled,
+		BeforeExpiryMin:   settings.AutoResetCreditsBeforeExpiryMin,
+		LowBalanceEnabled: settings.AutoResetCreditsLowBalanceEnabled,
+		UsageMaxAge:       usageMaxAge,
 	}, nil
 }
 
@@ -331,6 +351,52 @@ func earliestAutoResetCredit(credits []proxy.WhamResetCreditItem, now time.Time,
 		}
 	}
 	return selected, selectedAt, found
+}
+
+func earliestAvailableAutoResetCredit(credits []proxy.WhamResetCreditItem, now time.Time) (proxy.WhamResetCreditItem, time.Time, bool) {
+	var selected proxy.WhamResetCreditItem
+	var selectedAt time.Time
+	found := false
+	for _, credit := range credits {
+		expiresAt, err := time.Parse(time.RFC3339Nano, credit.EffectiveConsumableUntil())
+		if err != nil || !expiresAt.After(now) {
+			continue
+		}
+		if !found || expiresAt.Before(selectedAt) || (expiresAt.Equal(selectedAt) && credit.ID < selected.ID) {
+			selected = credit
+			selectedAt = expiresAt
+			found = true
+		}
+	}
+	return selected, selectedAt, found
+}
+
+func selectAutoResetCredit(credits []proxy.WhamResetCreditItem, account *auth.Account, now time.Time, settings autoResetCreditsConfig) (proxy.WhamResetCreditItem, time.Time, string, bool) {
+	if settings.LowBalanceEnabled && autoResetCreditsLowBalance(account, now, settings.UsageMaxAge) {
+		credit, expiresAt, ok := earliestAvailableAutoResetCredit(credits, now)
+		return credit, expiresAt, "low_balance", ok
+	}
+	if settings.ExpiryEnabled {
+		credit, expiresAt, ok := earliestAutoResetCredit(credits, now, time.Duration(settings.BeforeExpiryMin)*time.Minute)
+		return credit, expiresAt, "expiring", ok
+	}
+	return proxy.WhamResetCreditItem{}, time.Time{}, "", false
+}
+
+func autoResetCreditsLowBalance(account *auth.Account, now time.Time, maxAge time.Duration) bool {
+	if account == nil {
+		return false
+	}
+	usagePercent, valid := account.GetUsagePercent7d()
+	updatedAt := account.GetUsageUpdatedAt()
+	if !valid || updatedAt.IsZero() || usagePercent < 99 || maxAge <= 0 {
+		return false
+	}
+	if now.After(updatedAt) && now.Sub(updatedAt) > maxAge {
+		return false
+	}
+	resetAt := account.GetReset7dAt()
+	return resetAt.IsZero() || resetAt.After(now) || !updatedAt.Before(resetAt)
 }
 
 func stableAutoResetCreditRequestID(account *auth.Account, credit proxy.WhamResetCreditItem) string {

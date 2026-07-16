@@ -1832,6 +1832,7 @@ export interface SystemSettings {
   auto_clean_expired: boolean
   auto_reset_credits_enabled: boolean
   auto_reset_credits_before_expiry_min: number
+  auto_reset_credits_low_balance_enabled: boolean
   auto_activate_5h_window_enabled: boolean
   proxy_pool_enabled: boolean
   fast_scheduler_enabled: boolean

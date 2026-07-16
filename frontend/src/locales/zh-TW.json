@@ -246,7 +246,15 @@
     "codexPriorityServiceTier": "高餘額自動 Fast",
     "codexPriorityServiceTierDesc": "帳號排程後，Codex 文字模型在有效額度視窗達到設定的最低剩餘額度時自動使用 Fast。已知不相容的模型會被排除，Payload Rules 可覆寫此值。",
     "codexPriorityServiceTierMinRemainingRatio": "自動 Fast 最低剩餘額度",
-    "codexPriorityServiceTierMinRemainingRatioDesc": "有效的長週期額度，以及存在時的 5 小時視窗，都必須至少剩餘此比例。範圍 0-100%，預設 50%。"
+    "codexPriorityServiceTierMinRemainingRatioDesc": "有效的長週期額度，以及存在時的 5 小時視窗，都必須至少剩餘此比例。範圍 0-100%，預設 50%。",
+    "autoResetCreditsTitle": "主動重設次數自動消耗",
+    "autoResetCreditsDesc": "定期檢查 Plus/Pro 帳號；最早一張即將到期，或有效的 7d 額度快照顯示剩餘不超過 1% 時，每輪最多自動消耗一次。預設關閉。",
+    "autoResetCreditsEnabled": "啟用到期前自動消耗",
+    "autoResetCreditsEnabledDesc": "開啟後立即掃描一次，之後每 5 分鐘檢查。每個帳號每輪最多消耗一次，並記錄 reset_credit / auto 稽核事件。",
+    "autoResetCreditsLowBalanceEnabled": "啟用低餘額自動消耗",
+    "autoResetCreditsLowBalanceEnabledDesc": "當有效的 7d 額度快照顯示剩餘不超過 1% 時，自動消耗到期時間最近的一次可用重設額度。此開關可獨立於到期前自動消耗使用。",
+    "autoResetCreditsBeforeExpiry": "提前觸發時間",
+    "autoResetCreditsBeforeExpiryDesc": "當最早可用重設次數距離到期不超過此時間時觸發。範圍 10–10080 分鐘，預設 60。"
   },
   "promptFilter": {
     "views": {

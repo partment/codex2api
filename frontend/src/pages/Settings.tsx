@@ -3105,6 +3105,17 @@ export default function Settings() {
                       )}
                     />
                   </SettingField>
+                  <SettingField
+                    label={t('settings.autoResetCreditsLowBalanceEnabled')}
+                    description={t('settings.autoResetCreditsLowBalanceEnabledDesc')}
+                    layout="switch"
+                    className="h-full"
+                  >
+                    <Switch
+                      checked={settingsForm.auto_reset_credits_low_balance_enabled}
+                      onCheckedChange={(checked) => autoSaveBooleanField('auto_reset_credits_low_balance_enabled', checked)}
+                    />
+                  </SettingField>
                   <div className="flex min-h-[48px] min-w-0 items-center justify-between gap-3 rounded-lg border border-border/60 bg-muted/20 px-3 py-2.5">
                     <div className="min-w-0 flex-1 space-y-0.5">
                       <div className="flex items-center gap-1.5">

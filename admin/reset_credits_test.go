@@ -86,6 +86,35 @@ func TestEarliestAutoResetCreditUsesConsumableUntilAndFutureWindow(t *testing.T)
 	}
 }
 
+func TestAutoResetCreditsLowBalanceRequiresUsable7dSnapshot(t *testing.T) {
+	now := time.Date(2026, 7, 12, 4, 0, 0, 0, time.UTC)
+	maxAge := 10 * time.Minute
+	tests := []struct {
+		name      string
+		usage     float64
+		updatedAt time.Time
+		resetAt   time.Time
+		want      bool
+	}{
+		{name: "one_percent_remaining", usage: 99, updatedAt: now.Add(-time.Minute), resetAt: now.Add(24 * time.Hour), want: true},
+		{name: "below_threshold", usage: 98.99, updatedAt: now.Add(-time.Minute), resetAt: now.Add(24 * time.Hour)},
+		{name: "missing_timestamp", usage: 100, resetAt: now.Add(24 * time.Hour)},
+		{name: "stale_snapshot", usage: 100, updatedAt: now.Add(-11 * time.Minute), resetAt: now.Add(24 * time.Hour)},
+		{name: "snapshot_before_elapsed_reset", usage: 100, updatedAt: now.Add(-2 * time.Minute), resetAt: now.Add(-time.Minute)},
+		{name: "snapshot_after_elapsed_reset", usage: 99, updatedAt: now.Add(-time.Minute), resetAt: now.Add(-2 * time.Minute), want: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			account := &auth.Account{}
+			account.SetUsageSnapshot(tc.usage, tc.updatedAt)
+			account.SetReset7dAt(tc.resetAt)
+			if got := autoResetCreditsLowBalance(account, now, maxAge); got != tc.want {
+				t.Fatalf("autoResetCreditsLowBalance() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestAutoResetCreditsPlanOnlyPlusAndPro(t *testing.T) {
 	for _, plan := range []string{"plus", "pro", "prolite", "PRO-LITE"} {
 		if !isAutoResetCreditsPlan(plan) {
@@ -171,6 +200,83 @@ func TestRunAutoResetCreditsScanConsumesOneAndAuditsAuto(t *testing.T) {
 	case <-probeDone:
 	case <-time.After(time.Second):
 		t.Fatal("post-reset usage probe was not triggered")
+	}
+}
+
+func TestRunAutoResetCreditsScanConsumesNearestExpiryAtLowBalance(t *testing.T) {
+	previous := proxy.CurrentRuntimeSettings()
+	t.Cleanup(func() { proxy.ApplyRuntimeSettings(previous) })
+	runtimeSettings := proxy.DefaultRuntimeSettings()
+	runtimeSettings.AutoResetCreditsLowBalanceEnabled = true
+	proxy.ApplyRuntimeSettings(runtimeSettings)
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	account := &auth.Account{DBID: 21, AccountID: "workspace-21", AccessToken: "token", PlanType: "plus"}
+	now := time.Date(2026, 7, 12, 4, 0, 0, 0, time.UTC)
+	account.SetUsageSnapshot(99, now.Add(-time.Minute))
+	account.SetReset7dAt(now.Add(24 * time.Hour))
+	store.AddAccount(account)
+
+	nearest := proxy.WhamResetCreditItem{
+		ID:              "nearest",
+		ResetType:       "codex_rate_limits",
+		Status:          "available",
+		ConsumableUntil: now.Add(6 * time.Hour).Format(time.RFC3339),
+	}
+	later := proxy.WhamResetCreditItem{
+		ID:              "later",
+		ResetType:       "codex_rate_limits",
+		Status:          "available",
+		ConsumableUntil: now.Add(48 * time.Hour).Format(time.RFC3339),
+	}
+	var gotRedeemID string
+	handler := &Handler{
+		store: store,
+		queryResetCredits: func(context.Context, *auth.Account, string) (*proxy.WhamResetCreditsList, *http.Response, error) {
+			return &proxy.WhamResetCreditsList{AvailableCount: 2, Credits: []proxy.WhamResetCreditItem{later, nearest}}, nil, nil
+		},
+		consumeResetCredit: func(_ context.Context, _ *auth.Account, _ string, redeemID string) (*proxy.WhamResetResult, *http.Response, error) {
+			gotRedeemID = redeemID
+			return &proxy.WhamResetResult{WindowsReset: 1}, &http.Response{StatusCode: http.StatusOK}, nil
+		},
+		recordAccountEvent: func(int64, string, string) {},
+		probeUsage:         func(context.Context, *auth.Account) error { return nil },
+	}
+
+	stats := handler.runAutoResetCreditsScan(context.Background(), now)
+	if !stats.Enabled || stats.Queried != 1 || stats.Candidates != 1 || stats.Consumed != 1 || stats.Failed != 0 {
+		t.Fatalf("stats = %+v", stats)
+	}
+	if want := stableAutoResetCreditRequestID(account, nearest); gotRedeemID != want {
+		t.Fatalf("redeem ID = %q, want nearest credit ID %q", gotRedeemID, want)
+	}
+}
+
+func TestRunAutoResetCreditsScanLowBalanceSkipsBelowThresholdWithoutQuery(t *testing.T) {
+	previous := proxy.CurrentRuntimeSettings()
+	t.Cleanup(func() { proxy.ApplyRuntimeSettings(previous) })
+	runtimeSettings := proxy.DefaultRuntimeSettings()
+	runtimeSettings.AutoResetCreditsLowBalanceEnabled = true
+	proxy.ApplyRuntimeSettings(runtimeSettings)
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	account := &auth.Account{DBID: 22, AccessToken: "token", PlanType: "pro"}
+	now := time.Date(2026, 7, 12, 4, 0, 0, 0, time.UTC)
+	account.SetUsageSnapshot(98.9, now.Add(-time.Minute))
+	account.SetReset7dAt(now.Add(24 * time.Hour))
+	store.AddAccount(account)
+
+	queried := false
+	handler := &Handler{
+		store: store,
+		queryResetCredits: func(context.Context, *auth.Account, string) (*proxy.WhamResetCreditsList, *http.Response, error) {
+			queried = true
+			return nil, nil, nil
+		},
+	}
+	stats := handler.runAutoResetCreditsScan(context.Background(), now)
+	if !stats.Enabled || stats.Queried != 0 || stats.Consumed != 0 || queried {
+		t.Fatalf("stats=%+v queried=%v, want enabled scan without query", stats, queried)
 	}
 }
 

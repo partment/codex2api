@@ -11,6 +11,9 @@ func TestDefaultRuntimeSettingsAutoResetCreditsDisabled(t *testing.T) {
 	if settings.AutoResetCreditsEnabled {
 		t.Fatal("AutoResetCreditsEnabled = true, want false")
 	}
+	if settings.AutoResetCreditsLowBalanceEnabled {
+		t.Fatal("AutoResetCreditsLowBalanceEnabled = true, want false")
+	}
 	if settings.AutoResetCreditsBeforeExpiryMin != 60 {
 		t.Fatalf("AutoResetCreditsBeforeExpiryMin = %d, want 60", settings.AutoResetCreditsBeforeExpiryMin)
 	}
@@ -54,13 +57,17 @@ func TestApplyRuntimeSettingsFromSystemAutoResetCredits(t *testing.T) {
 	t.Cleanup(func() { ApplyRuntimeSettings(previous) })
 
 	settings := ApplyRuntimeSettingsFromSystem(&database.SystemSettings{
-		AutoResetCreditsEnabled:         true,
-		AutoResetCreditsBeforeExpiryMin: 90,
+		AutoResetCreditsEnabled:           true,
+		AutoResetCreditsBeforeExpiryMin:   90,
+		AutoResetCreditsLowBalanceEnabled: true,
 	})
 	if !settings.AutoResetCreditsEnabled {
 		t.Fatal("AutoResetCreditsEnabled = false, want true")
 	}
 	if settings.AutoResetCreditsBeforeExpiryMin != 90 {
 		t.Fatalf("AutoResetCreditsBeforeExpiryMin = %d, want 90", settings.AutoResetCreditsBeforeExpiryMin)
+	}
+	if !settings.AutoResetCreditsLowBalanceEnabled {
+		t.Fatal("AutoResetCreditsLowBalanceEnabled = false, want true")
 	}
 }

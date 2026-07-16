@@ -139,6 +139,8 @@ type RuntimeSettings struct {
 	AutoResetCreditsEnabled bool
 	// AutoResetCreditsBeforeExpiryMin 是进入自动消费窗口的提前分钟数（默认 60）。
 	AutoResetCreditsBeforeExpiryMin int
+	// AutoResetCreditsLowBalanceEnabled 控制 7d 剩余额度不超过 1% 时自动消费最早到期重置次数。
+	AutoResetCreditsLowBalanceEnabled bool
 	// AutoActivate5hWindowEnabled 控制 5h 窗口重置后是否发送一次最小真实 /responses 启动下一轮窗口（默认 false，issue #581）。
 	AutoActivate5hWindowEnabled bool
 	// UTLSShutdownTimeoutMin 是 uTLS（CODEX_TRANSPORT_MODE=utls_chrome）连接被摘出
@@ -382,6 +384,7 @@ func ApplyRuntimeSettingsFromSystem(settings *database.SystemSettings) RuntimeSe
 		next.CodexCLIVersionSyncIntervalHours = settings.CodexCLIVersionSyncIntervalHours
 		next.AutoResetCreditsEnabled = settings.AutoResetCreditsEnabled
 		next.AutoResetCreditsBeforeExpiryMin = settings.AutoResetCreditsBeforeExpiryMin
+		next.AutoResetCreditsLowBalanceEnabled = settings.AutoResetCreditsLowBalanceEnabled
 		next.AutoActivate5hWindowEnabled = settings.AutoActivate5hWindowEnabled
 		next.UTLSShutdownTimeoutMin = settings.UTLSShutdownTimeoutMinutes
 		// Payload 重写规则不进 RuntimeSettings（编译后独立存放），此处顺带完成启动种子。

@@ -1611,7 +1611,13 @@ func TestUpdateSettingsPersistsAutoResetCreditsAcrossPartialUpdates(t *testing.T
 	default:
 		t.Fatal("enable change did not queue an immediate scan")
 	}
-	update(`{"auto_reset_credits_enabled":true,"auto_reset_credits_before_expiry_min":90}`)
+	update(`{"auto_reset_credits_low_balance_enabled":true}`)
+	select {
+	case <-handler.autoResetCreditsWake:
+	default:
+		t.Fatal("low-balance enable change did not queue an immediate scan")
+	}
+	update(`{"auto_reset_credits_enabled":true,"auto_reset_credits_before_expiry_min":90,"auto_reset_credits_low_balance_enabled":true}`)
 	select {
 	case <-handler.autoResetCreditsWake:
 		t.Fatal("same-value auto-reset settings queued another scan")
@@ -1642,6 +1648,9 @@ func TestUpdateSettingsPersistsAutoResetCreditsAcrossPartialUpdates(t *testing.T
 	}
 	if persisted.AutoResetCreditsBeforeExpiryMin != 90 {
 		t.Fatalf("AutoResetCreditsBeforeExpiryMin = %d, want 90", persisted.AutoResetCreditsBeforeExpiryMin)
+	}
+	if !persisted.AutoResetCreditsLowBalanceEnabled {
+		t.Fatal("AutoResetCreditsLowBalanceEnabled = false, want true")
 	}
 	if persisted.ModelPricingOverrides != settings.ModelPricingOverrides {
 		t.Fatalf("ModelPricingOverrides = %q, want %q", persisted.ModelPricingOverrides, settings.ModelPricingOverrides)
@@ -2270,7 +2279,7 @@ func TestUpdateSettingsDoesNotEnableAutoResetCreditsWhenPersistenceFails(t *test
 	cancel()
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
-	request := httptest.NewRequest(http.MethodPut, "/api/admin/settings", strings.NewReader(`{"auto_reset_credits_enabled":true,"codex_priority_service_tier_enabled":true,"codex_priority_service_tier_min_remaining_ratio":0.8}`))
+	request := httptest.NewRequest(http.MethodPut, "/api/admin/settings", strings.NewReader(`{"auto_reset_credits_enabled":true,"auto_reset_credits_low_balance_enabled":true,"codex_priority_service_tier_enabled":true,"codex_priority_service_tier_min_remaining_ratio":0.8}`))
 	ctx.Request = request.WithContext(requestCtx)
 	ctx.Request.Header.Set("Content-Type", "application/json")
 
@@ -2278,8 +2287,8 @@ func TestUpdateSettingsDoesNotEnableAutoResetCreditsWhenPersistenceFails(t *test
 	if recorder.Code != http.StatusInternalServerError {
 		t.Fatalf("status=%d, want %d body=%s", recorder.Code, http.StatusInternalServerError, recorder.Body.String())
 	}
-	if current := proxy.CurrentRuntimeSettings(); current.AutoResetCreditsEnabled || current.CodexPriorityServiceTierEnabled || current.CodexPriorityMinRemainingRatio != 0.5 {
-		t.Fatalf("runtime settings changed after persistence failure: auto_reset=%t auto_fast=%t ratio=%v", current.AutoResetCreditsEnabled, current.CodexPriorityServiceTierEnabled, current.CodexPriorityMinRemainingRatio)
+	if current := proxy.CurrentRuntimeSettings(); current.AutoResetCreditsEnabled || current.AutoResetCreditsLowBalanceEnabled || current.CodexPriorityServiceTierEnabled || current.CodexPriorityMinRemainingRatio != 0.5 {
+		t.Fatalf("runtime settings changed after persistence failure: auto_reset=%t low_balance=%t auto_fast=%t ratio=%v", current.AutoResetCreditsEnabled, current.AutoResetCreditsLowBalanceEnabled, current.CodexPriorityServiceTierEnabled, current.CodexPriorityMinRemainingRatio)
 	}
 }
 
@@ -2330,6 +2339,7 @@ func TestAutoResetCreditsSettingsUseDatabaseAuthorityOnStaleInstance(t *testing.
 	settings := defaultBootstrapSettings()
 	settings.AutoResetCreditsEnabled = false
 	settings.AutoResetCreditsBeforeExpiryMin = 60
+	settings.AutoResetCreditsLowBalanceEnabled = false
 	settings.CodexPriorityServiceTierEnabled = false
 	settings.CodexPriorityMinRemainingRatio = 0.2
 	if err := db.UpdateSystemSettings(context.Background(), settings); err != nil {
@@ -2342,6 +2352,7 @@ func TestAutoResetCreditsSettingsUseDatabaseAuthorityOnStaleInstance(t *testing.
 	staleRuntime := proxy.DefaultRuntimeSettings()
 	staleRuntime.AutoResetCreditsEnabled = true
 	staleRuntime.AutoResetCreditsBeforeExpiryMin = 90
+	staleRuntime.AutoResetCreditsLowBalanceEnabled = true
 	staleRuntime.CodexPriorityServiceTierEnabled = true
 	staleRuntime.CodexPriorityMinRemainingRatio = 0.8
 	proxy.ApplyRuntimeSettings(staleRuntime)
@@ -2357,8 +2368,8 @@ func TestAutoResetCreditsSettingsUseDatabaseAuthorityOnStaleInstance(t *testing.
 	if err := json.Unmarshal(getRecorder.Body.Bytes(), &response); err != nil {
 		t.Fatalf("decode GET settings: %v", err)
 	}
-	if response.AutoResetCreditsEnabled || response.AutoResetCreditsBeforeExpiryMin != 60 {
-		t.Fatalf("GET auto settings=(%v,%d), want DB authority (false,60)", response.AutoResetCreditsEnabled, response.AutoResetCreditsBeforeExpiryMin)
+	if response.AutoResetCreditsEnabled || response.AutoResetCreditsBeforeExpiryMin != 60 || response.AutoResetCreditsLowBalanceEnabled {
+		t.Fatalf("GET auto settings=(%v,%d,%v), want DB authority (false,60,false)", response.AutoResetCreditsEnabled, response.AutoResetCreditsBeforeExpiryMin, response.AutoResetCreditsLowBalanceEnabled)
 	}
 	if response.CodexPriorityServiceTierEnabled || response.CodexPriorityMinRemainingRatio != 0.2 {
 		t.Fatalf("GET auto Fast settings=(%t,%v), want DB authority (false,0.2)", response.CodexPriorityServiceTierEnabled, response.CodexPriorityMinRemainingRatio)
@@ -2377,15 +2388,15 @@ func TestAutoResetCreditsSettingsUseDatabaseAuthorityOnStaleInstance(t *testing.
 	if err != nil {
 		t.Fatalf("GetSystemSettings: %v", err)
 	}
-	if persisted.AutoResetCreditsEnabled || persisted.AutoResetCreditsBeforeExpiryMin != 60 {
-		t.Fatalf("persisted auto settings=(%v,%d), want (false,60)", persisted.AutoResetCreditsEnabled, persisted.AutoResetCreditsBeforeExpiryMin)
+	if persisted.AutoResetCreditsEnabled || persisted.AutoResetCreditsBeforeExpiryMin != 60 || persisted.AutoResetCreditsLowBalanceEnabled {
+		t.Fatalf("persisted auto settings=(%v,%d,%v), want (false,60,false)", persisted.AutoResetCreditsEnabled, persisted.AutoResetCreditsBeforeExpiryMin, persisted.AutoResetCreditsLowBalanceEnabled)
 	}
 	if persisted.CodexPriorityServiceTierEnabled || persisted.CodexPriorityMinRemainingRatio != 0.2 {
 		t.Fatalf("persisted auto Fast settings=(%t,%v), want (false,0.2)", persisted.CodexPriorityServiceTierEnabled, persisted.CodexPriorityMinRemainingRatio)
 	}
 	current := proxy.CurrentRuntimeSettings()
-	if current.AutoResetCreditsEnabled || current.AutoResetCreditsBeforeExpiryMin != 60 {
-		t.Fatalf("runtime auto settings=(%v,%d), want refreshed DB authority (false,60)", current.AutoResetCreditsEnabled, current.AutoResetCreditsBeforeExpiryMin)
+	if current.AutoResetCreditsEnabled || current.AutoResetCreditsBeforeExpiryMin != 60 || current.AutoResetCreditsLowBalanceEnabled {
+		t.Fatalf("runtime auto settings=(%v,%d,%v), want refreshed DB authority (false,60,false)", current.AutoResetCreditsEnabled, current.AutoResetCreditsBeforeExpiryMin, current.AutoResetCreditsLowBalanceEnabled)
 	}
 	if current.CodexPriorityServiceTierEnabled || current.CodexPriorityMinRemainingRatio != 0.2 {
 		t.Fatalf("runtime auto Fast settings=(%t,%v), want refreshed DB authority (false,0.2)", current.CodexPriorityServiceTierEnabled, current.CodexPriorityMinRemainingRatio)

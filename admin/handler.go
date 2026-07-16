@@ -8937,6 +8937,7 @@ type settingsResponse struct {
 	AutoCleanExpired                    bool   `json:"auto_clean_expired"`
 	AutoResetCreditsEnabled             bool   `json:"auto_reset_credits_enabled"`
 	AutoResetCreditsBeforeExpiryMin     int    `json:"auto_reset_credits_before_expiry_min"`
+	AutoResetCreditsLowBalanceEnabled   bool   `json:"auto_reset_credits_low_balance_enabled"`
 	AutoActivate5hWindowEnabled         bool   `json:"auto_activate_5h_window_enabled"`
 	ProxyPoolEnabled                    bool   `json:"proxy_pool_enabled"`
 	FastSchedulerEnabled                bool   `json:"fast_scheduler_enabled"`
@@ -9118,6 +9119,7 @@ type updateSettingsReq struct {
 	AutoCleanExpired                    *bool                            `json:"auto_clean_expired"`
 	AutoResetCreditsEnabled             *bool                            `json:"auto_reset_credits_enabled"`
 	AutoResetCreditsBeforeExpiryMin     *int                             `json:"auto_reset_credits_before_expiry_min"`
+	AutoResetCreditsLowBalanceEnabled   *bool                            `json:"auto_reset_credits_low_balance_enabled"`
 	AutoActivate5hWindowEnabled         *bool                            `json:"auto_activate_5h_window_enabled"`
 	ProxyPoolEnabled                    *bool                            `json:"proxy_pool_enabled"`
 	FastSchedulerEnabled                *bool                            `json:"fast_scheduler_enabled"`
@@ -9885,6 +9887,7 @@ func (h *Handler) GetSettings(c *gin.Context) {
 	runtimeCfg := proxy.CurrentRuntimeSettings()
 	autoResetCreditsEnabled := runtimeCfg.AutoResetCreditsEnabled
 	autoResetCreditsBeforeExpiryMin := runtimeCfg.AutoResetCreditsBeforeExpiryMin
+	autoResetCreditsLowBalanceEnabled := runtimeCfg.AutoResetCreditsLowBalanceEnabled
 	autoActivate5hWindowEnabled := runtimeCfg.AutoActivate5hWindowEnabled
 	codexPriorityServiceTierEnabled := runtimeCfg.CodexPriorityServiceTierEnabled
 	codexPriorityMinRemainingRatio := runtimeCfg.CodexPriorityMinRemainingRatio
@@ -9893,6 +9896,7 @@ func (h *Handler) GetSettings(c *gin.Context) {
 	if dbSettings != nil {
 		autoResetCreditsEnabled = dbSettings.AutoResetCreditsEnabled
 		autoResetCreditsBeforeExpiryMin = dbSettings.AutoResetCreditsBeforeExpiryMin
+		autoResetCreditsLowBalanceEnabled = dbSettings.AutoResetCreditsLowBalanceEnabled
 		autoActivate5hWindowEnabled = dbSettings.AutoActivate5hWindowEnabled
 		codexPriorityServiceTierEnabled = dbSettings.CodexPriorityServiceTierEnabled
 		codexPriorityMinRemainingRatio = database.NormalizeCodexPriorityMinRemainingRatio(dbSettings.CodexPriorityMinRemainingRatio)
@@ -9949,6 +9953,7 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		AutoCleanExpired:                    h.store.GetAutoCleanExpired(),
 		AutoResetCreditsEnabled:             autoResetCreditsEnabled,
 		AutoResetCreditsBeforeExpiryMin:     autoResetCreditsBeforeExpiryMin,
+		AutoResetCreditsLowBalanceEnabled:   autoResetCreditsLowBalanceEnabled,
 		AutoActivate5hWindowEnabled:         autoActivate5hWindowEnabled,
 		ProxyPoolEnabled:                    h.store.GetProxyPoolEnabled(),
 		FastSchedulerEnabled:                h.store.FastSchedulerEnabled(),
@@ -10357,6 +10362,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	modelPricingSyncURL := ""
 	persistedAutoResetCreditsEnabled := false
 	persistedAutoResetCreditsBeforeExpiryMin := 60
+	persistedAutoResetCreditsLowBalanceEnabled := false
 	persistedAutoActivate5hWindowEnabled := false
 	persistedCodexPriorityServiceTierEnabled := false
 	persistedCodexPriorityMinRemainingRatio := database.DefaultCodexPriorityMinRemainingRatio
@@ -10382,6 +10388,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		modelPricingSyncURL = existingSettings.ModelPricingSyncURL
 		persistedAutoResetCreditsEnabled = existingSettings.AutoResetCreditsEnabled
 		persistedAutoResetCreditsBeforeExpiryMin = existingSettings.AutoResetCreditsBeforeExpiryMin
+		persistedAutoResetCreditsLowBalanceEnabled = existingSettings.AutoResetCreditsLowBalanceEnabled
 		persistedAutoActivate5hWindowEnabled = existingSettings.AutoActivate5hWindowEnabled
 		persistedCodexPriorityServiceTierEnabled = existingSettings.CodexPriorityServiceTierEnabled
 		persistedCodexPriorityMinRemainingRatio = database.NormalizeCodexPriorityMinRemainingRatio(existingSettings.CodexPriorityMinRemainingRatio)
@@ -10454,6 +10461,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	runtimeCfg := proxy.CurrentRuntimeSettings()
 	previousAutoResetCreditsEnabled := runtimeCfg.AutoResetCreditsEnabled
 	previousAutoResetCreditsBeforeExpiryMin := runtimeCfg.AutoResetCreditsBeforeExpiryMin
+	previousAutoResetCreditsLowBalanceEnabled := runtimeCfg.AutoResetCreditsLowBalanceEnabled
 	previousAutoActivate5hWindowEnabled := runtimeCfg.AutoActivate5hWindowEnabled
 	previousCodexPriorityServiceTierEnabled := runtimeCfg.CodexPriorityServiceTierEnabled
 	previousCodexPriorityMinRemainingRatio := runtimeCfg.CodexPriorityMinRemainingRatio
@@ -10461,6 +10469,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	// 避免旧实例保存无关字段时把自动消费或自动 Fast 配置回滚成自己的陈旧快照。
 	runtimeCfg.AutoResetCreditsEnabled = persistedAutoResetCreditsEnabled
 	runtimeCfg.AutoResetCreditsBeforeExpiryMin = persistedAutoResetCreditsBeforeExpiryMin
+	runtimeCfg.AutoResetCreditsLowBalanceEnabled = persistedAutoResetCreditsLowBalanceEnabled
 	runtimeCfg.AutoActivate5hWindowEnabled = persistedAutoActivate5hWindowEnabled
 	runtimeCfg.CodexPriorityServiceTierEnabled = persistedCodexPriorityServiceTierEnabled
 	runtimeCfg.CodexPriorityMinRemainingRatio = persistedCodexPriorityMinRemainingRatio
@@ -10478,7 +10487,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	continuousRetryChanged := req.ContinuousRetryEnabled != nil || req.ContinuousRetryCatchAll != nil || req.ContinuousRetryCategories != nil || req.ContinuousRetryStatusCodes != nil || req.ContinuousRetryErrorCodes != nil || req.ContinuousRetryMaxDurationSeconds != nil
 	utlsShutdownTimeoutMinutes := persistedUTLSShutdownTimeoutMinutes
 	autoResetCreditsChanged := (req.AutoResetCreditsEnabled != nil && *req.AutoResetCreditsEnabled != persistedAutoResetCreditsEnabled) ||
-		(req.AutoResetCreditsBeforeExpiryMin != nil && *req.AutoResetCreditsBeforeExpiryMin != persistedAutoResetCreditsBeforeExpiryMin)
+		(req.AutoResetCreditsBeforeExpiryMin != nil && *req.AutoResetCreditsBeforeExpiryMin != persistedAutoResetCreditsBeforeExpiryMin) ||
+		(req.AutoResetCreditsLowBalanceEnabled != nil && *req.AutoResetCreditsLowBalanceEnabled != persistedAutoResetCreditsLowBalanceEnabled)
 	autoActivate5hChanged := req.AutoActivate5hWindowEnabled != nil && *req.AutoActivate5hWindowEnabled != persistedAutoActivate5hWindowEnabled
 	codexPriorityServiceTierChanged := (req.CodexPriorityServiceTierEnabled != nil &&
 		*req.CodexPriorityServiceTierEnabled != persistedCodexPriorityServiceTierEnabled) ||
@@ -11204,6 +11214,10 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		runtimeCfg.AutoResetCreditsBeforeExpiryMin = *req.AutoResetCreditsBeforeExpiryMin
 		log.Printf("设置已更新: auto_reset_credits_before_expiry_min = %d", *req.AutoResetCreditsBeforeExpiryMin)
 	}
+	if req.AutoResetCreditsLowBalanceEnabled != nil {
+		runtimeCfg.AutoResetCreditsLowBalanceEnabled = *req.AutoResetCreditsLowBalanceEnabled
+		log.Printf("设置已更新: auto_reset_credits_low_balance_enabled = %t", *req.AutoResetCreditsLowBalanceEnabled)
+	}
 	if req.AutoActivate5hWindowEnabled != nil {
 		runtimeCfg.AutoActivate5hWindowEnabled = *req.AutoActivate5hWindowEnabled
 		log.Printf("设置已更新: auto_activate_5h_window_enabled = %t", *req.AutoActivate5hWindowEnabled)
@@ -11215,6 +11229,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	if autoResetCreditsChanged {
 		effectiveRuntimeCfg.AutoResetCreditsEnabled = previousAutoResetCreditsEnabled
 		effectiveRuntimeCfg.AutoResetCreditsBeforeExpiryMin = previousAutoResetCreditsBeforeExpiryMin
+		effectiveRuntimeCfg.AutoResetCreditsLowBalanceEnabled = previousAutoResetCreditsLowBalanceEnabled
 	}
 	if autoActivate5hChanged {
 		effectiveRuntimeCfg.AutoActivate5hWindowEnabled = previousAutoActivate5hWindowEnabled
@@ -11470,6 +11485,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		AutoCleanExpired:                    h.store.GetAutoCleanExpired(),
 		AutoResetCreditsEnabled:             runtimeCfg.AutoResetCreditsEnabled,
 		AutoResetCreditsBeforeExpiryMin:     runtimeCfg.AutoResetCreditsBeforeExpiryMin,
+		AutoResetCreditsLowBalanceEnabled:   runtimeCfg.AutoResetCreditsLowBalanceEnabled,
 		AutoActivate5hWindowEnabled:         runtimeCfg.AutoActivate5hWindowEnabled,
 		ProxyPoolEnabled:                    h.store.GetProxyPoolEnabled(),
 		FastSchedulerEnabled:                h.store.FastSchedulerEnabled(),
@@ -11790,6 +11806,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		AutoCleanExpired:                    h.store.GetAutoCleanExpired(),
 		AutoResetCreditsEnabled:             runtimeCfg.AutoResetCreditsEnabled,
 		AutoResetCreditsBeforeExpiryMin:     runtimeCfg.AutoResetCreditsBeforeExpiryMin,
+		AutoResetCreditsLowBalanceEnabled:   runtimeCfg.AutoResetCreditsLowBalanceEnabled,
 		AutoActivate5hWindowEnabled:         runtimeCfg.AutoActivate5hWindowEnabled,
 		ProxyPoolEnabled:                    h.store.GetProxyPoolEnabled(),
 		FastSchedulerEnabled:                h.store.FastSchedulerEnabled(),
