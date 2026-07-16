@@ -1530,6 +1530,7 @@ func TestSQLiteSystemSettingsPersistsFirstTokenTimeoutSeconds(t *testing.T) {
 		IgnoreUsageLimitStatus:            true,
 		AutoResetCreditsEnabled:           true,
 		AutoResetCreditsBeforeExpiryMin:   75,
+		AutoResetCreditsLowBalanceEnabled: true,
 		AutoActivate5hWindowEnabled:       true,
 	}); err != nil {
 		t.Fatalf("UpdateSystemSettings 返回错误: %v", err)
@@ -1562,6 +1563,9 @@ func TestSQLiteSystemSettingsPersistsFirstTokenTimeoutSeconds(t *testing.T) {
 	}
 	if settings.AutoResetCreditsBeforeExpiryMin != 75 {
 		t.Fatalf("AutoResetCreditsBeforeExpiryMin = %d, want 75", settings.AutoResetCreditsBeforeExpiryMin)
+	}
+	if !settings.AutoResetCreditsLowBalanceEnabled {
+		t.Fatal("AutoResetCreditsLowBalanceEnabled = false, want true")
 	}
 	if !settings.AutoActivate5hWindowEnabled {
 		t.Fatal("AutoActivate5hWindowEnabled = false, want true")
