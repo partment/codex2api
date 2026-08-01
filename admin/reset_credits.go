@@ -147,7 +147,7 @@ func (h *Handler) ResetCredits(c *gin.Context) {
 	// 整个重置操作（含 401 刷新后的重试）复用同一个幂等键，
 	// 让上游对重复请求去重，避免多扣一次重置次数。
 	redeemRequestID := uuid.New().String()
-	outcome, failure := h.consumeResetCreditLocked(ctx, account, redeemRequestID, "manual")
+	outcome, failure := h.consumeResetCreditLocked(ctx, account, redeemRequestID, "manual", nil)
 	if failure != nil {
 		h.writeManualResetCreditFailure(c, account, failure)
 		return
@@ -175,10 +175,11 @@ func (h *Handler) ResetCredits(c *gin.Context) {
 }
 
 type resetCreditConsumeOutcome struct {
-	WindowsReset   int
-	Remaining      int
-	AlreadyHandled bool
-	InProgress     bool
+	WindowsReset        int
+	Remaining           int
+	AlreadyHandled      bool
+	InProgress          bool
+	StatePersistenceErr error
 	// UsageRefreshed 在重置后的用量探针跑完时关闭。手动路径等它，
 	// 确保响应返回时账号的用量快照与状态已经是新的。
 	UsageRefreshed <-chan struct{}
@@ -191,9 +192,11 @@ type resetCreditConsumeFailure struct {
 	RefreshErr error
 }
 
+type resetCreditConsumeValidator func(context.Context) (bool, error)
+
 // consumeResetCreditLocked 执行一次共享的重置消费流程。调用方必须持有工作区级
 // resetCreditLock，确保手动与自动路径不会在同一进程内并发消耗。
-func (h *Handler) consumeResetCreditLocked(ctx context.Context, account *auth.Account, redeemRequestID, source string) (resetCreditConsumeOutcome, *resetCreditConsumeFailure) {
+func (h *Handler) consumeResetCreditLocked(ctx context.Context, account *auth.Account, redeemRequestID, source string, validate resetCreditConsumeValidator) (resetCreditConsumeOutcome, *resetCreditConsumeFailure) {
 	if source == "auto" && strings.TrimSpace(redeemRequestID) != "" {
 		if h.autoResetCreditRequestHandled(redeemRequestID, time.Now()) {
 			remaining := -1
@@ -217,6 +220,15 @@ func (h *Handler) consumeResetCreditLocked(ctx context.Context, account *auth.Ac
 			return resetCreditConsumeOutcome{}, &resetCreditConsumeFailure{RequestErr: fmt.Errorf("recheck reset-credit cooldown: %w", cooldownErr)}
 		}
 		if coolingDown {
+			return resetCreditConsumeOutcome{AlreadyHandled: true}, nil
+		}
+	}
+	if validate != nil {
+		valid, validateErr := validate(ctx)
+		if validateErr != nil {
+			return resetCreditConsumeOutcome{}, &resetCreditConsumeFailure{RequestErr: fmt.Errorf("revalidate reset-credit consume: %w", validateErr)}
+		}
+		if !valid {
 			return resetCreditConsumeOutcome{AlreadyHandled: true}, nil
 		}
 	}
@@ -250,6 +262,10 @@ func (h *Handler) consumeResetCreditLocked(ctx context.Context, account *auth.Ac
 	}
 	if source == "auto" && strings.TrimSpace(redeemRequestID) != "" {
 		h.rememberAutoResetCreditRequest(redeemRequestID, time.Now())
+	}
+	outcome.StatePersistenceErr = h.markAutoResetLowBalanceConsumed(account)
+	if outcome.StatePersistenceErr != nil {
+		log.Printf("[账号 %d] 主动重置已成功，但低余额 episode 状态无法共享持久化: %v", account.DBID, outcome.StatePersistenceErr)
 	}
 	h.markResetCreditSuccess(account)
 	h.recordResetCreditEvent(account.DBID, source)
@@ -346,6 +362,40 @@ func (h *Handler) markResetCreditSuccess(account *auth.Account) {
 	if err := h.cache.SetRuntime(ctx, resetCreditCooldownNamespace, key, json.RawMessage(`true`), autoResetCreditsScanInterval); err != nil {
 		log.Printf("[账号 %d] 写入主动重置冷却标记失败: %v", account.DBID, err)
 	}
+}
+
+func (h *Handler) loadAutoResetLowBalanceState(ctx context.Context, account *auth.Account) (auth.AutoResetLowBalanceState, error) {
+	if h != nil && h.store != nil {
+		return h.store.LoadAutoResetLowBalanceState(ctx, account)
+	}
+	if account == nil {
+		return auth.AutoResetLowBalanceState{}, nil
+	}
+	return account.GetAutoResetLowBalanceState(), nil
+}
+
+// markAutoResetLowBalanceConsumed blocks the current high-usage episode before
+// the distributed lease is released. Probe failures cannot rearm the episode.
+func (h *Handler) markAutoResetLowBalanceConsumed(account *auth.Account) error {
+	if account == nil {
+		return nil
+	}
+	snapshot := account.GetUsageSnapshot7d()
+	if !snapshot.Valid || snapshot.Percent < auth.AutoResetLowBalanceThreshold {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	state, err := h.loadAutoResetLowBalanceState(ctx, account)
+	if err != nil {
+		log.Printf("[账号 %d] 读取低余额自动重置状态失败，继续写入最新消费边界: %v", account.DBID, err)
+	}
+	state = state.Merge(auth.AutoResetLowBalanceState{ConsumedAt: time.Now()})
+	if h != nil && h.store != nil {
+		return h.store.SaveAutoResetLowBalanceState(ctx, account, state)
+	}
+	account.MergeAutoResetLowBalanceState(state)
+	return err
 }
 
 func (h *Handler) writeManualResetCreditFailure(c *gin.Context, account *auth.Account, failure *resetCreditConsumeFailure) {
@@ -481,13 +531,7 @@ func (h *Handler) resetCreditLock(account *auth.Account) *sync.Mutex {
 }
 
 func resetCreditLockKey(account *auth.Account) string {
-	if account == nil {
-		return "account:nil"
-	}
-	if identity := strings.TrimSpace(account.EffectiveAccountID()); identity != "" {
-		return "workspace:" + identity
-	}
-	return "db:" + strconv.FormatInt(account.DBID, 10)
+	return auth.AutoResetLowBalanceStateKey(account)
 }
 
 // refreshAccountForReset 在重置遇到 401 时刷新账号 token，复用注入的刷新函数

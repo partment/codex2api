@@ -7567,7 +7567,83 @@ func (db *DB) UpdateOAuthAccountCredentials(ctx context.Context, id int64, crede
 	return tx.Commit()
 }
 
-// UpdateUsageSnapshot 持久化账号用量快照（7d + 5h）
+// MergeAutoResetLowBalanceState advances low-balance episode boundaries in one
+// row-locked transaction so a delayed recovery write cannot erase a newer
+// consumption recorded by another instance.
+func (db *DB) MergeAutoResetLowBalanceState(ctx context.Context, id int64, consumedAt, recoveredAt time.Time) (time.Time, time.Time, error) {
+	var mergedConsumedAt time.Time
+	var mergedRecoveredAt time.Time
+	err := db.withSQLiteWriteLock(ctx, func() error {
+		tx, err := db.conn.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+
+		query := `SELECT credentials FROM accounts WHERE id = $1`
+		if !db.isSQLite() {
+			query += ` FOR UPDATE`
+		}
+		var currentRaw interface{}
+		if err := tx.QueryRowContext(ctx, query, id).Scan(&currentRaw); err != nil {
+			return err
+		}
+		credentials := decodeCredentials(currentRaw)
+		fields := [...]struct {
+			key         string
+			destination *time.Time
+		}{
+			{key: "auto_reset_low_balance_consumed_at", destination: &mergedConsumedAt},
+			{key: "auto_reset_low_balance_recovered_at", destination: &mergedRecoveredAt},
+		}
+		for _, field := range fields {
+			raw := strings.TrimSpace(credentialStringFromMap(credentials, field.key))
+			if raw == "" {
+				continue
+			}
+			parsed, err := time.Parse(time.RFC3339, raw)
+			if err != nil {
+				return fmt.Errorf("parse %s: %w", field.key, err)
+			}
+			*field.destination = parsed
+		}
+		if consumedAt.After(mergedConsumedAt) {
+			mergedConsumedAt = consumedAt
+		}
+		if recoveredAt.After(mergedRecoveredAt) {
+			mergedRecoveredAt = recoveredAt
+		}
+		if !mergedConsumedAt.IsZero() {
+			credentials["auto_reset_low_balance_consumed_at"] = mergedConsumedAt.Format(time.RFC3339Nano)
+		}
+		if !mergedRecoveredAt.IsZero() {
+			credentials["auto_reset_low_balance_recovered_at"] = mergedRecoveredAt.Format(time.RFC3339Nano)
+		}
+		encoded, err := json.Marshal(credentials)
+		if err != nil {
+			return fmt.Errorf("序列化 credentials 失败: %w", err)
+		}
+		update := `UPDATE accounts SET credentials = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`
+		if !db.isSQLite() {
+			update = `UPDATE accounts SET credentials = $1::jsonb, updated_at = CURRENT_TIMESTAMP WHERE id = $2`
+		}
+		result, err := tx.ExecContext(ctx, update, encoded, id)
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected == 0 {
+			return sql.ErrNoRows
+		}
+		return tx.Commit()
+	})
+	return mergedConsumedAt, mergedRecoveredAt, err
+}
+
+// UpdateUsageSnapshot preserves the original percentage-only API.
 func (db *DB) UpdateUsageSnapshot(ctx context.Context, id int64, pct7d float64, updatedAt time.Time) error {
 	return db.UpdateCredentials(ctx, id, map[string]interface{}{
 		"codex_7d_used_percent":  pct7d,
@@ -7575,15 +7651,75 @@ func (db *DB) UpdateUsageSnapshot(ctx context.Context, id int64, pct7d float64, 
 	})
 }
 
-// UpdateUsageSnapshotFull 持久化完整用量快照（5h + 7d + 重置时间）
-func (db *DB) UpdateUsageSnapshotFull(ctx context.Context, id int64, pct7d float64, reset7dAt time.Time, pct5h float64, reset5hAt time.Time, updatedAt7d time.Time, updatedAt5h time.Time) error {
+// UpdateUsageSnapshot7d persists one complete authoritative 7d observation.
+func (db *DB) UpdateUsageSnapshot7d(ctx context.Context, id int64, pct7d float64, reset7dAt time.Time, window7dSeconds int64, updatedAt time.Time, recoveredAt time.Time) error {
+	if updatedAt.IsZero() {
+		return fmt.Errorf("7d usage observation timestamp is required")
+	}
+	if !recoveredAt.IsZero() {
+		if _, _, err := db.MergeAutoResetLowBalanceState(ctx, id, time.Time{}, recoveredAt); err != nil {
+			return err
+		}
+	}
 	fields := map[string]interface{}{
+		"codex_7d_used_percent":  pct7d,
+		"codex_usage_updated_at": updatedAt.Format(time.RFC3339Nano),
+	}
+	if reset7dAt.IsZero() {
+		fields["codex_7d_reset_at"] = nil
+	} else {
+		fields["codex_7d_reset_at"] = reset7dAt.Format(time.RFC3339Nano)
+	}
+	if window7dSeconds > 0 {
+		fields["codex_7d_window_seconds"] = window7dSeconds
+	}
+	return db.UpdateCredentials(ctx, id, fields)
+}
+
+// UpdateUsageSnapshotFull preserves the original complete snapshot API.
+func (db *DB) UpdateUsageSnapshotFull(ctx context.Context, id int64, pct7d float64, reset7dAt time.Time, pct5h float64, reset5hAt time.Time, updatedAt7d time.Time, updatedAt5h time.Time) error {
+	return db.UpdateCredentials(ctx, id, map[string]interface{}{
 		"codex_7d_used_percent":     pct7d,
 		"codex_7d_reset_at":         reset7dAt.Format(time.RFC3339),
 		"codex_5h_used_percent":     pct5h,
 		"codex_5h_reset_at":         reset5hAt.Format(time.RFC3339),
 		"codex_usage_updated_at":    updatedAt7d.Format(time.RFC3339),
 		"codex_5h_usage_updated_at": updatedAt5h.Format(time.RFC3339),
+	})
+}
+
+// UpdateUsageSnapshotFull7d persists one complete 5h + 7d observation.
+func (db *DB) UpdateUsageSnapshotFull7d(ctx context.Context, id int64, pct7d float64, reset7dAt time.Time, window7dSeconds int64, pct5h float64, reset5hAt time.Time, updatedAt7d time.Time, updatedAt5h time.Time, recoveredAt time.Time) error {
+	if updatedAt7d.IsZero() {
+		return fmt.Errorf("7d usage observation timestamp is required")
+	}
+	if !recoveredAt.IsZero() {
+		if _, _, err := db.MergeAutoResetLowBalanceState(ctx, id, time.Time{}, recoveredAt); err != nil {
+			return err
+		}
+	}
+	fields := map[string]interface{}{
+		"codex_7d_used_percent":  pct7d,
+		"codex_5h_used_percent":  pct5h,
+		"codex_usage_updated_at": updatedAt7d.Format(time.RFC3339Nano),
+	}
+	if reset7dAt.IsZero() {
+		fields["codex_7d_reset_at"] = nil
+	} else {
+		fields["codex_7d_reset_at"] = reset7dAt.Format(time.RFC3339Nano)
+	}
+	if window7dSeconds > 0 {
+		fields["codex_7d_window_seconds"] = window7dSeconds
+	}
+	if reset5hAt.IsZero() {
+		fields["codex_5h_reset_at"] = nil
+	} else {
+		fields["codex_5h_reset_at"] = reset5hAt.Format(time.RFC3339Nano)
+	}
+	if updatedAt5h.IsZero() {
+		fields["codex_5h_usage_updated_at"] = nil
+	} else {
+		fields["codex_5h_usage_updated_at"] = updatedAt5h.Format(time.RFC3339Nano)
 	}
 	return db.UpdateCredentials(ctx, id, fields)
 }

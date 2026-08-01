@@ -24,6 +24,7 @@ import (
 	"github.com/codex2api/database"
 	"github.com/codex2api/internal/openaiidentity"
 	"github.com/codex2api/security/promptfilter"
+	"github.com/google/uuid"
 )
 
 // AccountStatus 账号状态
@@ -86,6 +87,53 @@ func NormalizeTestContent(content string) string {
 		return DefaultTestContent
 	}
 	return content
+}
+
+const (
+	AutoResetLowBalanceThreshold      = 99.0
+	autoResetLowBalanceStateNamespace = "reset-credit-low-balance-state"
+	autoResetLowBalanceLeaseNamespace = "reset-credit-low-balance-state-write"
+	autoResetLowBalanceStateRetention = 370 * 24 * time.Hour
+	autoResetLowBalanceStateLeaseTTL  = 15 * time.Second
+)
+
+// UsageSnapshot7d keeps every field that defines one authoritative long-window
+// observation together so readers never combine values from different probes.
+type UsageSnapshot7d struct {
+	Percent       float64
+	Valid         bool
+	ResetAt       time.Time
+	WindowSeconds int64
+	UpdatedAt     time.Time
+}
+
+// AutoResetLowBalanceState identifies whether the current high-usage episode
+// has already consumed a reset credit. A later low observation rearms it.
+type AutoResetLowBalanceState struct {
+	ConsumedAt  time.Time `json:"consumed_at,omitempty"`
+	RecoveredAt time.Time `json:"recovered_at,omitempty"`
+}
+
+func (s AutoResetLowBalanceState) Merge(other AutoResetLowBalanceState) AutoResetLowBalanceState {
+	if other.ConsumedAt.After(s.ConsumedAt) {
+		s.ConsumedAt = other.ConsumedAt
+	}
+	if other.RecoveredAt.After(s.RecoveredAt) {
+		s.RecoveredAt = other.RecoveredAt
+	}
+	return s
+}
+
+// AutoResetLowBalanceStateKey returns the workspace-scoped key shared by
+// reset-credit locking and low-balance episode persistence.
+func AutoResetLowBalanceStateKey(account *Account) string {
+	if account == nil {
+		return "account:nil"
+	}
+	if identity := strings.TrimSpace(account.EffectiveAccountID()); identity != "" {
+		return "workspace:" + identity
+	}
+	return "db:" + strconv.FormatInt(account.DBID, 10)
 }
 
 // Account 运行时账号状态
@@ -214,6 +262,10 @@ type Account struct {
 	UsagePercentSparkValid bool
 	ResetSparkAt           time.Time
 	UsageUpdatedAtSpark    time.Time
+	// autoResetLowBalance* persists the low-balance episode boundary. A reset
+	// remains consumed until a newer authoritative snapshot falls below 99%.
+	autoResetLowBalanceConsumedAt  time.Time
+	autoResetLowBalanceRecoveredAt time.Time
 
 	// RateLimitResetCredits 是 OpenAI 官方账号剩余的「主动重置次数」，来自
 	// /backend-api/wham/usage 响应的 rate_limit_reset_credits.available_count。
@@ -2108,6 +2160,7 @@ func (a *Account) SetUsageSnapshot(pct float64, updatedAt time.Time) {
 	a.UsagePercent7d = pct
 	a.UsagePercent7dValid = true
 	a.UsageUpdatedAt = updatedAt
+	a.advanceAutoResetLowBalanceRecoveryLocked(pct, true, updatedAt)
 }
 
 // MarkClaudeUsageObservation records a native Claude response (or a bounded
@@ -2128,6 +2181,298 @@ func (a *Account) GetUsagePercent7d() (float64, bool) {
 	return a.UsagePercent7d, a.UsagePercent7dValid
 }
 
+// SetUsageSnapshot7d atomically applies one complete authoritative 7d
+// observation. A non-positive window length preserves the last known length.
+func (a *Account) SetUsageSnapshot7d(snapshot UsageSnapshot7d) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.UsagePercent7d = snapshot.Percent
+	a.UsagePercent7dValid = snapshot.Valid
+	a.Reset7dAt = snapshot.ResetAt
+	if snapshot.WindowSeconds > 0 {
+		a.Window7dSeconds = snapshot.WindowSeconds
+	}
+	a.UsageUpdatedAt = snapshot.UpdatedAt
+	if snapshot.UpdatedAt.After(a.usageObservedAt) {
+		a.usageObservedAt = snapshot.UpdatedAt
+	}
+	a.advanceAutoResetLowBalanceRecoveryLocked(snapshot.Percent, snapshot.Valid, snapshot.UpdatedAt)
+}
+
+// GetUsageSnapshot7d returns one coherent 7d observation under a single read lock.
+func (a *Account) GetUsageSnapshot7d() UsageSnapshot7d {
+	if a == nil {
+		return UsageSnapshot7d{}
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return UsageSnapshot7d{
+		Percent:       a.UsagePercent7d,
+		Valid:         a.UsagePercent7dValid,
+		ResetAt:       a.Reset7dAt,
+		WindowSeconds: a.Window7dSeconds,
+		UpdatedAt:     a.UsageUpdatedAt,
+	}
+}
+
+func (a *Account) advanceAutoResetLowBalanceRecoveryLocked(percent float64, valid bool, updatedAt time.Time) {
+	if !valid || percent >= AutoResetLowBalanceThreshold || updatedAt.IsZero() ||
+		!updatedAt.After(a.autoResetLowBalanceConsumedAt) || !updatedAt.After(a.autoResetLowBalanceRecoveredAt) {
+		return
+	}
+	a.autoResetLowBalanceRecoveredAt = updatedAt
+}
+
+func (a *Account) GetAutoResetLowBalanceState() AutoResetLowBalanceState {
+	if a == nil {
+		return AutoResetLowBalanceState{}
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return AutoResetLowBalanceState{
+		ConsumedAt:  a.autoResetLowBalanceConsumedAt,
+		RecoveredAt: a.autoResetLowBalanceRecoveredAt,
+	}
+}
+
+// MergeAutoResetLowBalanceState applies only newer episode boundaries.
+func (a *Account) MergeAutoResetLowBalanceState(state AutoResetLowBalanceState) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if state.ConsumedAt.After(a.autoResetLowBalanceConsumedAt) {
+		a.autoResetLowBalanceConsumedAt = state.ConsumedAt
+	}
+	if state.RecoveredAt.After(a.autoResetLowBalanceRecoveredAt) {
+		a.autoResetLowBalanceRecoveredAt = state.RecoveredAt
+	}
+}
+
+func (s *Store) autoResetLowBalanceWorkspaceAccounts(account *Account) []*Account {
+	if account == nil {
+		return nil
+	}
+	if s == nil {
+		return []*Account{account}
+	}
+
+	key := AutoResetLowBalanceStateKey(account)
+	accounts := make([]*Account, 0, 1)
+	for _, candidate := range s.Accounts() {
+		if candidate != nil && AutoResetLowBalanceStateKey(candidate) == key {
+			accounts = append(accounts, candidate)
+		}
+	}
+	if len(accounts) == 0 {
+		accounts = append(accounts, account)
+	}
+	return accounts
+}
+
+func autoResetLowBalanceStateFromRow(row *database.AccountRow) (AutoResetLowBalanceState, error) {
+	state := AutoResetLowBalanceState{}
+	fields := [...]struct {
+		key         string
+		destination *time.Time
+	}{
+		{key: "auto_reset_low_balance_consumed_at", destination: &state.ConsumedAt},
+		{key: "auto_reset_low_balance_recovered_at", destination: &state.RecoveredAt},
+	}
+	var parseErrors []error
+	for _, field := range fields {
+		raw := strings.TrimSpace(row.GetCredential(field.key))
+		if raw == "" {
+			continue
+		}
+		parsed, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			parseErrors = append(parseErrors, fmt.Errorf("parse %s: %w", field.key, err))
+			continue
+		}
+		*field.destination = parsed
+	}
+	return state, errors.Join(parseErrors...)
+}
+
+// LoadAutoResetLowBalanceState merges the current workspace state from memory,
+// shared runtime cache, and durable credentials. Either backend can recover a
+// transient failure in the other; if both fail the caller must fail closed.
+func (s *Store) LoadAutoResetLowBalanceState(ctx context.Context, account *Account) (AutoResetLowBalanceState, error) {
+	if account == nil {
+		return AutoResetLowBalanceState{}, nil
+	}
+	state := AutoResetLowBalanceState{}
+	accounts := s.autoResetLowBalanceWorkspaceAccounts(account)
+	for _, candidate := range accounts {
+		state = state.Merge(candidate.GetAutoResetLowBalanceState())
+	}
+	if s == nil {
+		return state, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	var backendSucceeded bool
+	var backendAttempted bool
+	var backendErrors []error
+	cacheMiss := false
+	if s.tokenCache != nil {
+		backendAttempted = true
+		raw, found, err := s.tokenCache.GetRuntime(ctx, autoResetLowBalanceStateNamespace, AutoResetLowBalanceStateKey(account))
+		if err != nil {
+			backendErrors = append(backendErrors, fmt.Errorf("read shared low-balance state: %w", err))
+		} else if found {
+			var cached AutoResetLowBalanceState
+			if err := json.Unmarshal(raw, &cached); err != nil {
+				backendErrors = append(backendErrors, fmt.Errorf("decode shared low-balance state: %w", err))
+			} else {
+				state = state.Merge(cached)
+				backendSucceeded = true
+			}
+		} else {
+			cacheMiss = true
+		}
+	}
+
+	if s.db != nil {
+		backendAttempted = true
+		databaseSucceeded := true
+		for _, candidate := range accounts {
+			if candidate.DBID <= 0 {
+				continue
+			}
+			row, err := s.db.GetAccountByID(ctx, candidate.DBID)
+			if err != nil {
+				databaseSucceeded = false
+				backendErrors = append(backendErrors, fmt.Errorf("read account %d low-balance state: %w", candidate.DBID, err))
+				continue
+			}
+			persisted, err := autoResetLowBalanceStateFromRow(row)
+			state = state.Merge(persisted)
+			if err != nil {
+				databaseSucceeded = false
+				backendErrors = append(backendErrors, fmt.Errorf("read account %d low-balance state: %w", candidate.DBID, err))
+				continue
+			}
+		}
+		backendSucceeded = backendSucceeded || databaseSucceeded
+	} else if cacheMiss {
+		backendSucceeded = true
+	}
+
+	for _, candidate := range accounts {
+		candidate.MergeAutoResetLowBalanceState(state)
+	}
+	if backendAttempted && !backendSucceeded {
+		return state, errors.Join(backendErrors...)
+	}
+	return state, nil
+}
+
+// SaveAutoResetLowBalanceState publishes a workspace episode boundary to every
+// local duplicate and to both shared backends. One successful backend is enough
+// to preserve correctness because readers merge cache and database state.
+func (s *Store) SaveAutoResetLowBalanceState(ctx context.Context, account *Account, state AutoResetLowBalanceState) error {
+	if account == nil {
+		return nil
+	}
+	accounts := s.autoResetLowBalanceWorkspaceAccounts(account)
+	for _, candidate := range accounts {
+		state = state.Merge(candidate.GetAutoResetLowBalanceState())
+	}
+	if s == nil {
+		for _, candidate := range accounts {
+			candidate.MergeAutoResetLowBalanceState(state)
+		}
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	var backendSucceeded bool
+	var backendAttempted bool
+	var backendErrors []error
+	databaseSucceeded := false
+	if s.db != nil {
+		backendAttempted = true
+		databaseSucceeded = true
+		for _, candidate := range accounts {
+			if candidate.DBID <= 0 {
+				continue
+			}
+			consumedAt, recoveredAt, err := s.db.MergeAutoResetLowBalanceState(ctx, candidate.DBID, state.ConsumedAt, state.RecoveredAt)
+			if err != nil {
+				databaseSucceeded = false
+				backendErrors = append(backendErrors, fmt.Errorf("write account %d low-balance state: %w", candidate.DBID, err))
+				continue
+			}
+			state = state.Merge(AutoResetLowBalanceState{ConsumedAt: consumedAt, RecoveredAt: recoveredAt})
+		}
+		backendSucceeded = databaseSucceeded
+	}
+
+	if s.tokenCache != nil {
+		backendAttempted = true
+		key := AutoResetLowBalanceStateKey(account)
+		owner := uuid.New().String()
+		acquired, err := s.tokenCache.AcquireLease(ctx, autoResetLowBalanceLeaseNamespace, key, owner, autoResetLowBalanceStateLeaseTTL)
+		if err != nil {
+			backendErrors = append(backendErrors, fmt.Errorf("acquire shared low-balance state lease: %w", err))
+		} else if !acquired {
+			backendErrors = append(backendErrors, fmt.Errorf("shared low-balance state is being updated"))
+		} else {
+			cacheWritable := true
+			raw, found, readErr := s.tokenCache.GetRuntime(ctx, autoResetLowBalanceStateNamespace, key)
+			if readErr != nil {
+				backendErrors = append(backendErrors, fmt.Errorf("read shared low-balance state before write: %w", readErr))
+				cacheWritable = databaseSucceeded
+			} else if found {
+				var cached AutoResetLowBalanceState
+				if err := json.Unmarshal(raw, &cached); err != nil {
+					backendErrors = append(backendErrors, fmt.Errorf("decode shared low-balance state before write: %w", err))
+					cacheWritable = databaseSucceeded
+				} else {
+					state = state.Merge(cached)
+				}
+			}
+			if cacheWritable {
+				raw, err := json.Marshal(state)
+				if err != nil {
+					backendErrors = append(backendErrors, fmt.Errorf("encode shared low-balance state: %w", err))
+				} else if err := s.tokenCache.SetRuntime(ctx, autoResetLowBalanceStateNamespace, key, raw, autoResetLowBalanceStateRetention); err != nil {
+					backendErrors = append(backendErrors, fmt.Errorf("write shared low-balance state: %w", err))
+				} else {
+					backendSucceeded = true
+				}
+			}
+			releaseCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			if err := s.tokenCache.ReleaseLease(releaseCtx, autoResetLowBalanceLeaseNamespace, key, owner); err != nil {
+				backendErrors = append(backendErrors, fmt.Errorf("release shared low-balance state lease: %w", err))
+			}
+			cancel()
+		}
+	}
+
+	for _, candidate := range accounts {
+		candidate.MergeAutoResetLowBalanceState(state)
+	}
+
+	if backendAttempted && !backendSucceeded {
+		return errors.Join(backendErrors...)
+	}
+	if len(backendErrors) > 0 {
+		log.Printf("[账号 %d] 低余额 episode 状态部分后端写入失败，已由另一后端保存: %v", account.DBID, errors.Join(backendErrors...))
+	}
+	return nil
+}
+
 // MarkUsage7dRateLimited marks an account as rate-limited when its active 7d
 // usage window is exhausted. A future reset time is preferred; missing reset
 // metadata falls back to a full 7d cooldown, while stale reset times are ignored.
@@ -2139,14 +2484,14 @@ func (s *Store) MarkUsage7dRateLimited(acc *Account) bool {
 		return false
 	}
 
-	pct, ok := acc.GetUsagePercent7d()
-	if !ok || pct < 100 {
+	snapshot := acc.GetUsageSnapshot7d()
+	if !snapshot.Valid || snapshot.Percent < 100 {
 		return false
 	}
 
 	duration := 7 * 24 * time.Hour
-	if resetAt := acc.GetReset7dAt(); !resetAt.IsZero() {
-		untilReset := time.Until(resetAt)
+	if !snapshot.ResetAt.IsZero() {
+		untilReset := time.Until(snapshot.ResetAt)
 		if untilReset <= 0 {
 			return false
 		}
@@ -5348,6 +5693,11 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 			account.SubscriptionExpiresAt = parsed
 		}
 	}
+	lowBalanceState, lowBalanceStateErr := autoResetLowBalanceStateFromRow(row)
+	if lowBalanceStateErr != nil {
+		log.Printf("[账号 %d] 解析低余额自动重置状态失败: %v", row.ID, lowBalanceStateErr)
+	}
+	account.MergeAutoResetLowBalanceState(lowBalanceState)
 	if row.CooldownUntil.Valid {
 		if time.Now().Before(row.CooldownUntil.Time) {
 			account.SetCooldownUntil(row.CooldownUntil.Time, row.CooldownReason)
@@ -5367,13 +5717,20 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 					log.Printf("[账号 %d] 解析 codex_usage_updated_at 失败: %v", row.ID, err)
 				}
 			}
-			account.SetUsageSnapshot(parsed, updatedAt)
-			// 恢复 7d 重置时间
-			if resetAt := row.GetCredential("codex_7d_reset_at"); resetAt != "" {
-				if t, err := time.Parse(time.RFC3339, resetAt); err == nil {
-					account.SetReset7dAt(t)
+			resetAt := time.Time{}
+			if rawResetAt := row.GetCredential("codex_7d_reset_at"); rawResetAt != "" {
+				if t, err := time.Parse(time.RFC3339, rawResetAt); err == nil {
+					resetAt = t
 				}
 			}
+			windowSeconds, _ := row.GetCredentialInt64("codex_7d_window_seconds")
+			account.SetUsageSnapshot7d(UsageSnapshot7d{
+				Percent:       parsed,
+				Valid:         true,
+				ResetAt:       resetAt,
+				WindowSeconds: windowSeconds,
+				UpdatedAt:     updatedAt,
+			})
 		} else {
 			log.Printf("[账号 %d] 解析 codex_7d_used_percent 失败: %v", row.ID, err)
 		}
@@ -10030,27 +10387,45 @@ func (s *Store) ReportRequestFailure(acc *Account, kind string, latency time.Dur
 	s.fastSchedulerUpdate(acc)
 }
 
-// PersistUsageSnapshot 持久化账号用量快照（7d + 5h）
+func (s *Store) applyUsageSnapshot7d(acc *Account, snapshot UsageSnapshot7d) (UsageSnapshot7d, time.Time) {
+	previousState := acc.GetAutoResetLowBalanceState()
+	acc.SetUsageSnapshot7d(snapshot)
+	snapshot = acc.GetUsageSnapshot7d()
+	lowBalanceState := acc.GetAutoResetLowBalanceState()
+	recoveredAtToPersist := time.Time{}
+	if lowBalanceState.RecoveredAt.After(previousState.RecoveredAt) {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		if err := s.SaveAutoResetLowBalanceState(ctx, acc, lowBalanceState); err != nil {
+			log.Printf("[账号 %d] 持久化低余额恢复 episode 失败: %v", acc.DBID, err)
+		}
+		cancel()
+		lowBalanceState = acc.GetAutoResetLowBalanceState()
+		recoveredAtToPersist = lowBalanceState.RecoveredAt
+	}
+	s.fastSchedulerUpdate(acc)
+	return snapshot, recoveredAtToPersist
+}
+
+// PersistUsageSnapshot preserves the original percentage-only API and its
+// non-destructive database updates for reset metadata.
 func (s *Store) PersistUsageSnapshot(acc *Account, pct7d float64) {
-	if acc == nil {
+	if s == nil || acc == nil {
 		return
 	}
-
 	now := time.Now()
-	acc.SetUsageSnapshot(pct7d, now)
-	s.fastSchedulerUpdate(acc)
+	snapshot := acc.GetUsageSnapshot7d()
+	snapshot.Percent = pct7d
+	snapshot.Valid = true
+	snapshot.UpdatedAt = now
+	s.applyUsageSnapshot7d(acc, snapshot)
 
 	if s.db == nil {
 		return
 	}
-
-	// 如果有 5h 数据，使用完整存储
 	if pct5h, ok := acc.GetUsagePercent5h(); ok {
-		reset5hAt := acc.GetReset5hAt()
-		reset7dAt := acc.GetReset7dAt()
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		if err := s.db.UpdateUsageSnapshotFull(ctx, acc.DBID, pct7d, reset7dAt, pct5h, reset5hAt, now, acc.GetUsageUpdatedAt5h()); err != nil {
+		if err := s.db.UpdateUsageSnapshotFull(ctx, acc.DBID, pct7d, acc.GetReset7dAt(), pct5h, acc.GetReset5hAt(), now, acc.GetUsageUpdatedAt5h()); err != nil {
 			log.Printf("[账号 %d] 持久化用量快照失败: %v", acc.DBID, err)
 		}
 		return
@@ -10059,6 +10434,46 @@ func (s *Store) PersistUsageSnapshot(acc *Account, pct7d float64) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if err := s.db.UpdateUsageSnapshot(ctx, acc.DBID, pct7d, now); err != nil {
+		log.Printf("[账号 %d] 持久化用量快照失败: %v", acc.DBID, err)
+	}
+}
+
+// PersistUsageSnapshot7d atomically applies and persists one coherent 7d snapshot.
+func (s *Store) PersistUsageSnapshot7d(acc *Account, snapshot UsageSnapshot7d) {
+	if s == nil || acc == nil {
+		return
+	}
+	snapshot, recoveredAtToPersist := s.applyUsageSnapshot7d(acc, snapshot)
+
+	if s.db == nil {
+		return
+	}
+
+	// 如果有 5h 数据，使用完整存储
+	if pct5h, ok := acc.GetUsagePercent5h(); ok {
+		reset5hAt := acc.GetReset5hAt()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := s.db.UpdateUsageSnapshotFull7d(
+			ctx,
+			acc.DBID,
+			snapshot.Percent,
+			snapshot.ResetAt,
+			snapshot.WindowSeconds,
+			pct5h,
+			reset5hAt,
+			snapshot.UpdatedAt,
+			acc.GetUsageUpdatedAt5h(),
+			recoveredAtToPersist,
+		); err != nil {
+			log.Printf("[账号 %d] 持久化用量快照失败: %v", acc.DBID, err)
+		}
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := s.db.UpdateUsageSnapshot7d(ctx, acc.DBID, snapshot.Percent, snapshot.ResetAt, snapshot.WindowSeconds, snapshot.UpdatedAt, recoveredAtToPersist); err != nil {
 		log.Printf("[账号 %d] 持久化用量快照失败: %v", acc.DBID, err)
 	}
 }
