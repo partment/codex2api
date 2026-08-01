@@ -205,7 +205,15 @@ func (h *Handler) autoResetCreditsForAccount(ctx context.Context, account *auth.
 		return false, false, false, nil
 	}
 	decisionNow := autoResetCreditsDecisionTime(now)
-	if !settings.ExpiryEnabled && !autoResetCreditsLowBalance(account, decisionNow, settings.UsageMaxAge) {
+	lowBalance := autoResetLowBalanceDecision{}
+	var lowBalanceErr error
+	if settings.LowBalanceEnabled {
+		lowBalance, lowBalanceErr = h.autoResetLowBalanceDecision(ctx, account, decisionNow, settings.UsageMaxAge)
+		if lowBalanceErr != nil && !settings.ExpiryEnabled {
+			return false, false, false, fmt.Errorf("check low-balance reset episode: %w", lowBalanceErr)
+		}
+	}
+	if !settings.ExpiryEnabled && !lowBalance.Eligible {
 		return false, false, false, nil
 	}
 
@@ -226,8 +234,11 @@ func (h *Handler) autoResetCreditsForAccount(ctx context.Context, account *auth.
 	if !isAutoResetCreditsPlan(account.GetPlanType()) || strings.TrimSpace(account.GetAccessToken()) == "" {
 		return true, false, false, nil
 	}
-	credit, expiresAt, reason, ok := selectAutoResetCredit(credits, account, decisionNow, settings)
+	credit, expiresAt, reason, ok := selectAutoResetCredit(credits, decisionNow, settings, lowBalance.Eligible)
 	if !ok {
+		if lowBalanceErr != nil {
+			return true, false, false, fmt.Errorf("check low-balance reset episode: %w", lowBalanceErr)
+		}
 		return true, false, false, nil
 	}
 	candidate = true
@@ -242,12 +253,42 @@ func (h *Handler) autoResetCreditsForAccount(ctx context.Context, account *auth.
 		return true, true, false, nil
 	}
 	decisionNow = autoResetCreditsDecisionTime(now)
-	credit, expiresAt, reason, ok = selectAutoResetCredit(credits, account, decisionNow, settings)
+	lowBalance = autoResetLowBalanceDecision{}
+	lowBalanceErr = nil
+	if settings.LowBalanceEnabled {
+		lowBalance, lowBalanceErr = h.autoResetLowBalanceDecision(ctx, account, decisionNow, settings.UsageMaxAge)
+		if lowBalanceErr != nil && !settings.ExpiryEnabled {
+			return true, true, false, fmt.Errorf("recheck low-balance reset episode: %w", lowBalanceErr)
+		}
+	}
+	credit, expiresAt, reason, ok = selectAutoResetCredit(credits, decisionNow, settings, lowBalance.Eligible)
 	if !ok {
+		if lowBalanceErr != nil {
+			return true, true, false, fmt.Errorf("recheck low-balance reset episode: %w", lowBalanceErr)
+		}
 		return true, true, false, nil
 	}
 	redeemRequestID := stableAutoResetCreditRequestID(account, credit)
-	outcome, failure := h.consumeResetCreditLocked(ctx, account, redeemRequestID, "auto")
+	var validate resetCreditConsumeValidator
+	if reason == "low_balance" {
+		expectedEpisode := lowBalance.Episode
+		redeemRequestID = stableAutoResetLowBalanceRequestID(account, expectedEpisode)
+		validate = func(validateCtx context.Context) (bool, error) {
+			currentSettings, settingsErr := h.loadAutoResetCreditsConfig(validateCtx)
+			if settingsErr != nil {
+				return false, settingsErr
+			}
+			if !currentSettings.LowBalanceEnabled {
+				return false, nil
+			}
+			current, decisionErr := h.autoResetLowBalanceDecision(validateCtx, account, autoResetCreditsDecisionTime(now), currentSettings.UsageMaxAge)
+			if decisionErr != nil {
+				return false, decisionErr
+			}
+			return current.Eligible && current.Episode == expectedEpisode, nil
+		}
+	}
+	outcome, failure := h.consumeResetCreditLocked(ctx, account, redeemRequestID, "auto", validate)
 	if failure != nil {
 		return true, true, false, autoResetCreditFailureError(failure)
 	}
@@ -256,6 +297,9 @@ func (h *Handler) autoResetCreditsForAccount(ctx context.Context, account *auth.
 	}
 	if outcome.InProgress {
 		return true, true, false, nil
+	}
+	if outcome.StatePersistenceErr != nil {
+		return true, true, true, fmt.Errorf("persist low-balance reset episode: %w", outcome.StatePersistenceErr)
 	}
 	log.Printf("[auto-reset-credits] 账号 %d 已自动消耗重置额度: reason=%s expires_at=%s windows_reset=%d remaining=%d",
 		account.DBID, reason, expiresAt.UTC().Format(time.RFC3339), outcome.WindowsReset, outcome.Remaining)
@@ -371,8 +415,8 @@ func earliestAvailableAutoResetCredit(credits []proxy.WhamResetCreditItem, now t
 	return selected, selectedAt, found
 }
 
-func selectAutoResetCredit(credits []proxy.WhamResetCreditItem, account *auth.Account, now time.Time, settings autoResetCreditsConfig) (proxy.WhamResetCreditItem, time.Time, string, bool) {
-	if settings.LowBalanceEnabled && autoResetCreditsLowBalance(account, now, settings.UsageMaxAge) {
+func selectAutoResetCredit(credits []proxy.WhamResetCreditItem, now time.Time, settings autoResetCreditsConfig, lowBalanceEligible bool) (proxy.WhamResetCreditItem, time.Time, string, bool) {
+	if settings.LowBalanceEnabled && lowBalanceEligible {
 		credit, expiresAt, ok := earliestAvailableAutoResetCredit(credits, now)
 		return credit, expiresAt, "low_balance", ok
 	}
@@ -384,19 +428,47 @@ func selectAutoResetCredit(credits []proxy.WhamResetCreditItem, account *auth.Ac
 }
 
 func autoResetCreditsLowBalance(account *auth.Account, now time.Time, maxAge time.Duration) bool {
+	return account != nil && usableAutoResetCreditsLowBalance(account.GetUsageSnapshot7d(), now, maxAge)
+}
+
+func usableAutoResetCreditsLowBalance(snapshot auth.UsageSnapshot7d, now time.Time, maxAge time.Duration) bool {
+	if !snapshot.Valid || snapshot.UpdatedAt.IsZero() || snapshot.Percent < auth.AutoResetLowBalanceThreshold || maxAge <= 0 {
+		return false
+	}
+	if now.After(snapshot.UpdatedAt) && now.Sub(snapshot.UpdatedAt) > maxAge {
+		return false
+	}
+	return snapshot.ResetAt.IsZero() || snapshot.ResetAt.After(now) || !snapshot.UpdatedAt.Before(snapshot.ResetAt)
+}
+
+type autoResetLowBalanceDecision struct {
+	Eligible bool
+	Episode  string
+}
+
+func (h *Handler) autoResetLowBalanceDecision(ctx context.Context, account *auth.Account, now time.Time, maxAge time.Duration) (autoResetLowBalanceDecision, error) {
 	if account == nil {
-		return false
+		return autoResetLowBalanceDecision{}, nil
 	}
-	usagePercent, valid := account.GetUsagePercent7d()
-	updatedAt := account.GetUsageUpdatedAt()
-	if !valid || updatedAt.IsZero() || usagePercent < 99 || maxAge <= 0 {
-		return false
+	snapshot := account.GetUsageSnapshot7d()
+	if !usableAutoResetCreditsLowBalance(snapshot, now, maxAge) {
+		return autoResetLowBalanceDecision{}, nil
 	}
-	if now.After(updatedAt) && now.Sub(updatedAt) > maxAge {
-		return false
+	state, err := h.loadAutoResetLowBalanceState(ctx, account)
+	if err != nil {
+		return autoResetLowBalanceDecision{}, err
 	}
-	resetAt := account.GetReset7dAt()
-	return resetAt.IsZero() || resetAt.After(now) || !updatedAt.Before(resetAt)
+	if !state.ConsumedAt.IsZero() && !state.RecoveredAt.After(state.ConsumedAt) {
+		return autoResetLowBalanceDecision{}, nil
+	}
+	if !state.RecoveredAt.IsZero() && !snapshot.UpdatedAt.After(state.RecoveredAt) {
+		return autoResetLowBalanceDecision{}, nil
+	}
+	episode := "initial"
+	if !state.RecoveredAt.IsZero() {
+		episode = state.RecoveredAt.UTC().Format(time.RFC3339Nano)
+	}
+	return autoResetLowBalanceDecision{Eligible: true, Episode: episode}, nil
 }
 
 func stableAutoResetCreditRequestID(account *auth.Account, credit proxy.WhamResetCreditItem) string {
@@ -412,6 +484,11 @@ func stableAutoResetCreditRequestID(account *auth.Account, credit proxy.WhamRese
 		trigger = credit.EffectiveConsumableUntil()
 	}
 	key := "codex2api:auto-reset-credit:" + identity + ":" + trigger
+	return uuid.NewSHA1(uuid.NameSpaceURL, []byte(key)).String()
+}
+
+func stableAutoResetLowBalanceRequestID(account *auth.Account, episode string) string {
+	key := "codex2api:auto-reset-credit:" + resetCreditLockKey(account) + ":low_balance:" + strings.TrimSpace(episode)
 	return uuid.NewSHA1(uuid.NameSpaceURL, []byte(key)).String()
 }
 

@@ -106,8 +106,7 @@ func TestAutoResetCreditsLowBalanceRequiresUsable7dSnapshot(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			account := &auth.Account{}
-			account.SetUsageSnapshot(tc.usage, tc.updatedAt)
-			account.SetReset7dAt(tc.resetAt)
+			account.SetUsageSnapshot7d(auth.UsageSnapshot7d{Percent: tc.usage, Valid: true, ResetAt: tc.resetAt, UpdatedAt: tc.updatedAt})
 			if got := autoResetCreditsLowBalance(account, now, maxAge); got != tc.want {
 				t.Fatalf("autoResetCreditsLowBalance() = %v, want %v", got, tc.want)
 			}
@@ -139,6 +138,13 @@ func TestStableAutoResetCreditRequestID(t *testing.T) {
 	other := stableAutoResetCreditRequestID(account, proxy.WhamResetCreditItem{ID: "credit-2"})
 	if first == other {
 		t.Fatalf("different credits share request ID %q", first)
+	}
+	lowBalance := stableAutoResetLowBalanceRequestID(account, "episode-1")
+	if lowBalance == "" || lowBalance != stableAutoResetLowBalanceRequestID(account, "episode-1") {
+		t.Fatalf("low-balance request ID is not stable: %q", lowBalance)
+	}
+	if lowBalance == stableAutoResetLowBalanceRequestID(account, "episode-2") {
+		t.Fatalf("different low-balance episodes share request ID %q", lowBalance)
 	}
 }
 
@@ -213,8 +219,7 @@ func TestRunAutoResetCreditsScanConsumesNearestExpiryAtLowBalance(t *testing.T) 
 	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
 	account := &auth.Account{DBID: 21, AccountID: "workspace-21", AccessToken: "token", PlanType: "plus"}
 	now := time.Date(2026, 7, 12, 4, 0, 0, 0, time.UTC)
-	account.SetUsageSnapshot(99, now.Add(-time.Minute))
-	account.SetReset7dAt(now.Add(24 * time.Hour))
+	account.SetUsageSnapshot7d(auth.UsageSnapshot7d{Percent: 99, Valid: true, ResetAt: now.Add(24 * time.Hour), UpdatedAt: now.Add(-time.Minute)})
 	store.AddAccount(account)
 
 	nearest := proxy.WhamResetCreditItem{
@@ -247,8 +252,8 @@ func TestRunAutoResetCreditsScanConsumesNearestExpiryAtLowBalance(t *testing.T) 
 	if !stats.Enabled || stats.Queried != 1 || stats.Candidates != 1 || stats.Consumed != 1 || stats.Failed != 0 {
 		t.Fatalf("stats = %+v", stats)
 	}
-	if want := stableAutoResetCreditRequestID(account, nearest); gotRedeemID != want {
-		t.Fatalf("redeem ID = %q, want nearest credit ID %q", gotRedeemID, want)
+	if want := stableAutoResetLowBalanceRequestID(account, "initial"); gotRedeemID != want {
+		t.Fatalf("redeem ID = %q, want low-balance episode ID %q", gotRedeemID, want)
 	}
 }
 
@@ -262,8 +267,7 @@ func TestRunAutoResetCreditsScanLowBalanceSkipsBelowThresholdWithoutQuery(t *tes
 	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
 	account := &auth.Account{DBID: 22, AccessToken: "token", PlanType: "pro"}
 	now := time.Date(2026, 7, 12, 4, 0, 0, 0, time.UTC)
-	account.SetUsageSnapshot(98.9, now.Add(-time.Minute))
-	account.SetReset7dAt(now.Add(24 * time.Hour))
+	account.SetUsageSnapshot7d(auth.UsageSnapshot7d{Percent: 98.9, Valid: true, ResetAt: now.Add(24 * time.Hour), UpdatedAt: now.Add(-time.Minute)})
 	store.AddAccount(account)
 
 	queried := false
@@ -277,6 +281,320 @@ func TestRunAutoResetCreditsScanLowBalanceSkipsBelowThresholdWithoutQuery(t *tes
 	stats := handler.runAutoResetCreditsScan(context.Background(), now)
 	if !stats.Enabled || stats.Queried != 0 || stats.Consumed != 0 || queried {
 		t.Fatalf("stats=%+v queried=%v, want enabled scan without query", stats, queried)
+	}
+}
+
+func TestAutoResetLowBalanceConsumesOnlyOnceWhenPostResetProbeFails(t *testing.T) {
+	previous := proxy.CurrentRuntimeSettings()
+	t.Cleanup(func() { proxy.ApplyRuntimeSettings(previous) })
+	settings := proxy.DefaultRuntimeSettings()
+	settings.AutoResetCreditsLowBalanceEnabled = true
+	proxy.ApplyRuntimeSettings(settings)
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	now := time.Now()
+	account := &auth.Account{DBID: 23, AccountID: "workspace-once", AccessToken: "token", PlanType: "plus"}
+	account.SetUsageSnapshot7d(auth.UsageSnapshot7d{
+		Percent:   99,
+		Valid:     true,
+		ResetAt:   now.Add(24 * time.Hour),
+		UpdatedAt: now.Add(-time.Minute),
+	})
+	store.AddAccount(account)
+	credit := proxy.WhamResetCreditItem{
+		ID:              "low-balance-credit",
+		ResetType:       "codex_rate_limits",
+		Status:          "available",
+		ConsumableUntil: now.Add(24 * time.Hour).Format(time.RFC3339),
+	}
+	queries := 0
+	consumes := 0
+	probeDone := make(chan struct{}, 1)
+	handler := &Handler{
+		store: store,
+		queryResetCredits: func(context.Context, *auth.Account, string) (*proxy.WhamResetCreditsList, *http.Response, error) {
+			queries++
+			return &proxy.WhamResetCreditsList{AvailableCount: 2, Credits: []proxy.WhamResetCreditItem{credit}}, nil, nil
+		},
+		consumeResetCredit: func(context.Context, *auth.Account, string, string) (*proxy.WhamResetResult, *http.Response, error) {
+			consumes++
+			return &proxy.WhamResetResult{WindowsReset: 1}, &http.Response{StatusCode: http.StatusOK}, nil
+		},
+		recordAccountEvent: func(int64, string, string) {},
+		probeUsage: func(context.Context, *auth.Account) error {
+			probeDone <- struct{}{}
+			return context.Canceled
+		},
+	}
+
+	first := handler.runAutoResetCreditsScan(context.Background(), now)
+	if first.Consumed != 1 || first.Failed != 0 {
+		t.Fatalf("first scan = %+v", first)
+	}
+	select {
+	case <-probeDone:
+	case <-time.After(time.Second):
+		t.Fatal("failed post-reset probe did not run")
+	}
+	handler.resetCreditLastSuccess.Delete(resetCreditLockKey(account))
+	second := handler.runAutoResetCreditsScan(context.Background(), now.Add(6*time.Minute))
+	if second.Queried != 0 || second.Consumed != 0 || queries != 1 || consumes != 1 {
+		t.Fatalf("second scan=%+v queries=%d consumes=%d, want same episode blocked", second, queries, consumes)
+	}
+}
+
+func TestAutoResetLowBalanceRearmsOnlyAfterLowThenNewHighSnapshot(t *testing.T) {
+	previous := proxy.CurrentRuntimeSettings()
+	t.Cleanup(func() { proxy.ApplyRuntimeSettings(previous) })
+	settings := proxy.DefaultRuntimeSettings()
+	settings.AutoResetCreditsLowBalanceEnabled = true
+	proxy.ApplyRuntimeSettings(settings)
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	now := time.Now()
+	account := &auth.Account{DBID: 24, AccountID: "workspace-rearm", AccessToken: "token", PlanType: "pro"}
+	account.SetUsageSnapshot7d(auth.UsageSnapshot7d{Percent: 99, Valid: true, ResetAt: now.Add(24 * time.Hour), UpdatedAt: now})
+	store.AddAccount(account)
+	credit := proxy.WhamResetCreditItem{ID: "rearm-credit", ResetType: "codex_rate_limits", Status: "available", ConsumableUntil: now.Add(24 * time.Hour).Format(time.RFC3339)}
+	consumes := 0
+	handler := &Handler{
+		store: store,
+		queryResetCredits: func(context.Context, *auth.Account, string) (*proxy.WhamResetCreditsList, *http.Response, error) {
+			return &proxy.WhamResetCreditsList{AvailableCount: 2, Credits: []proxy.WhamResetCreditItem{credit}}, nil, nil
+		},
+		consumeResetCredit: func(context.Context, *auth.Account, string, string) (*proxy.WhamResetResult, *http.Response, error) {
+			consumes++
+			return &proxy.WhamResetResult{WindowsReset: 1}, &http.Response{StatusCode: http.StatusOK}, nil
+		},
+		recordAccountEvent: func(int64, string, string) {},
+		probeUsage:         func(context.Context, *auth.Account) error { return nil },
+	}
+	if stats := handler.runAutoResetCreditsScan(context.Background(), now); stats.Consumed != 1 {
+		t.Fatalf("first scan = %+v", stats)
+	}
+	consumedAt := account.GetAutoResetLowBalanceState().ConsumedAt
+	if consumedAt.IsZero() {
+		t.Fatal("successful reset did not record consumed episode")
+	}
+
+	account.SetUsageSnapshot7d(auth.UsageSnapshot7d{Percent: 99.5, Valid: true, ResetAt: consumedAt.Add(24 * time.Hour), UpdatedAt: consumedAt.Add(time.Second)})
+	handler.resetCreditLastSuccess.Delete(resetCreditLockKey(account))
+	if stats := handler.runAutoResetCreditsScan(context.Background(), consumedAt.Add(time.Second)); stats.Queried != 0 || stats.Consumed != 0 {
+		t.Fatalf("newer high snapshot rearmed episode: %+v", stats)
+	}
+
+	recoveredAt := consumedAt.Add(2 * time.Second)
+	account.SetUsageSnapshot7d(auth.UsageSnapshot7d{Percent: 20, Valid: true, ResetAt: recoveredAt.Add(24 * time.Hour), UpdatedAt: recoveredAt})
+	highAt := recoveredAt.Add(time.Second)
+	account.SetUsageSnapshot7d(auth.UsageSnapshot7d{Percent: 99, Valid: true, ResetAt: highAt.Add(24 * time.Hour), UpdatedAt: highAt})
+	if stats := handler.runAutoResetCreditsScan(context.Background(), highAt); stats.Consumed != 1 {
+		t.Fatalf("low then high snapshot did not rearm episode: %+v", stats)
+	}
+	if consumes != 2 {
+		t.Fatalf("upstream consumes = %d, want 2 episodes", consumes)
+	}
+}
+
+func TestManualResetAtHighUsageBlocksLowBalanceAutoReset(t *testing.T) {
+	previous := proxy.CurrentRuntimeSettings()
+	t.Cleanup(func() { proxy.ApplyRuntimeSettings(previous) })
+	settings := proxy.DefaultRuntimeSettings()
+	settings.AutoResetCreditsLowBalanceEnabled = true
+	proxy.ApplyRuntimeSettings(settings)
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	now := time.Now()
+	account := &auth.Account{DBID: 25, AccountID: "workspace-manual-high", AccessToken: "token", PlanType: "plus"}
+	account.SetUsageSnapshot7d(auth.UsageSnapshot7d{Percent: 99, Valid: true, ResetAt: now.Add(24 * time.Hour), UpdatedAt: now})
+	store.AddAccount(account)
+	manual := &Handler{
+		store: store,
+		consumeResetCredit: func(context.Context, *auth.Account, string, string) (*proxy.WhamResetResult, *http.Response, error) {
+			return &proxy.WhamResetResult{WindowsReset: 1}, &http.Response{StatusCode: http.StatusOK}, nil
+		},
+		recordAccountEvent: func(int64, string, string) {},
+		probeUsage:         func(context.Context, *auth.Account) error { return nil },
+	}
+	if _, failure := manual.consumeResetCreditLocked(context.Background(), account, "manual-high", "manual", nil); failure != nil {
+		t.Fatalf("manual consume failure: %+v", failure)
+	}
+	queried := false
+	automatic := &Handler{
+		store: store,
+		queryResetCredits: func(context.Context, *auth.Account, string) (*proxy.WhamResetCreditsList, *http.Response, error) {
+			queried = true
+			return nil, nil, nil
+		},
+	}
+	if stats := automatic.runAutoResetCreditsScan(context.Background(), now.Add(time.Minute)); stats.Queried != 0 || stats.Consumed != 0 || queried {
+		t.Fatalf("auto scan=%+v queried=%v, want manual reset to block stale high snapshot", stats, queried)
+	}
+}
+
+func TestAutoResetLowBalanceStateIsSharedAcrossHandlers(t *testing.T) {
+	previous := proxy.CurrentRuntimeSettings()
+	t.Cleanup(func() { proxy.ApplyRuntimeSettings(previous) })
+	settings := proxy.DefaultRuntimeSettings()
+	settings.AutoResetCreditsLowBalanceEnabled = true
+	proxy.ApplyRuntimeSettings(settings)
+	tc := cache.NewMemory(4)
+	t.Cleanup(func() { _ = tc.Close() })
+
+	now := time.Now()
+	firstStore := auth.NewStore(nil, tc, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	firstAccount := &auth.Account{DBID: 26, AccountID: "workspace-shared-episode", AccessToken: "token", PlanType: "plus"}
+	firstAccount.SetUsageSnapshot7d(auth.UsageSnapshot7d{Percent: 99, Valid: true, ResetAt: now.Add(24 * time.Hour), UpdatedAt: now})
+	firstStore.AddAccount(firstAccount)
+	secondStore := auth.NewStore(nil, tc, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	secondAccount := &auth.Account{DBID: 27, AccountID: "workspace-shared-episode", AccessToken: "token", PlanType: "plus"}
+	secondAccount.SetUsageSnapshot7d(auth.UsageSnapshot7d{Percent: 99, Valid: true, ResetAt: now.Add(24 * time.Hour), UpdatedAt: now})
+	secondStore.AddAccount(secondAccount)
+	credit := proxy.WhamResetCreditItem{ID: "shared-credit", ResetType: "codex_rate_limits", Status: "available", ConsumableUntil: now.Add(24 * time.Hour).Format(time.RFC3339)}
+	firstHandler := &Handler{
+		store: firstStore,
+		cache: tc,
+		queryResetCredits: func(context.Context, *auth.Account, string) (*proxy.WhamResetCreditsList, *http.Response, error) {
+			return &proxy.WhamResetCreditsList{AvailableCount: 2, Credits: []proxy.WhamResetCreditItem{credit}}, nil, nil
+		},
+		consumeResetCredit: func(context.Context, *auth.Account, string, string) (*proxy.WhamResetResult, *http.Response, error) {
+			return &proxy.WhamResetResult{WindowsReset: 1}, &http.Response{StatusCode: http.StatusOK}, nil
+		},
+		recordAccountEvent: func(int64, string, string) {},
+		probeUsage:         func(context.Context, *auth.Account) error { return nil },
+	}
+	if stats := firstHandler.runAutoResetCreditsScan(context.Background(), now); stats.Consumed != 1 {
+		t.Fatalf("first handler scan = %+v", stats)
+	}
+	if err := tc.DeleteRuntime(context.Background(), resetCreditCooldownNamespace, resetCreditLockKey(firstAccount)); err != nil {
+		t.Fatalf("DeleteRuntime cooldown: %v", err)
+	}
+	secondQueries := 0
+	secondHandler := &Handler{
+		store: secondStore,
+		cache: tc,
+		queryResetCredits: func(context.Context, *auth.Account, string) (*proxy.WhamResetCreditsList, *http.Response, error) {
+			secondQueries++
+			return nil, nil, nil
+		},
+	}
+	if stats := secondHandler.runAutoResetCreditsScan(context.Background(), now.Add(time.Minute)); stats.Queried != 0 || stats.Consumed != 0 || secondQueries != 0 {
+		t.Fatalf("second handler scan=%+v queries=%d, want shared episode blocked", stats, secondQueries)
+	}
+	if secondAccount.GetAutoResetLowBalanceState().ConsumedAt.IsZero() {
+		t.Fatal("second handler did not hydrate shared consumed state")
+	}
+
+	consumedAt := firstAccount.GetAutoResetLowBalanceState().ConsumedAt
+	recoveredAt := consumedAt.Add(time.Second)
+	firstStore.PersistUsageSnapshot7d(firstAccount, auth.UsageSnapshot7d{
+		Percent:   20,
+		Valid:     true,
+		ResetAt:   recoveredAt.Add(24 * time.Hour),
+		UpdatedAt: recoveredAt,
+	})
+	highAt := recoveredAt.Add(time.Second)
+	secondAccount.SetUsageSnapshot7d(auth.UsageSnapshot7d{
+		Percent:   99,
+		Valid:     true,
+		ResetAt:   highAt.Add(24 * time.Hour),
+		UpdatedAt: highAt,
+	})
+	decision, err := secondHandler.autoResetLowBalanceDecision(context.Background(), secondAccount, highAt, 10*time.Minute)
+	if err != nil || !decision.Eligible || decision.Episode != recoveredAt.UTC().Format(time.RFC3339Nano) {
+		t.Fatalf("decision after cross-handler recovery = %+v, err=%v", decision, err)
+	}
+}
+
+func TestAutoResetLowBalanceConsumedStateSurvivesRestart(t *testing.T) {
+	db := newTestAdminDB(t)
+	ctx := context.Background()
+	id, err := db.InsertAccountWithCredentials(ctx, "restart-state", map[string]interface{}{
+		"access_token": "token",
+		"account_id":   "workspace-restart-state",
+		"plan_type":    "plus",
+	}, "")
+	if err != nil {
+		t.Fatalf("InsertAccountWithCredentials: %v", err)
+	}
+	store := auth.NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("store.Init: %v", err)
+	}
+	account := store.FindByID(id)
+	if account == nil {
+		t.Fatal("account was not loaded")
+	}
+	now := time.Now()
+	store.PersistUsageSnapshot7d(account, auth.UsageSnapshot7d{Percent: 99, Valid: true, ResetAt: now.Add(24 * time.Hour), UpdatedAt: now})
+	handler := &Handler{
+		store: store,
+		db:    db,
+		consumeResetCredit: func(context.Context, *auth.Account, string, string) (*proxy.WhamResetResult, *http.Response, error) {
+			return &proxy.WhamResetResult{WindowsReset: 1}, &http.Response{StatusCode: http.StatusOK}, nil
+		},
+		recordAccountEvent: func(int64, string, string) {},
+		probeUsage:         func(context.Context, *auth.Account) error { return nil },
+	}
+	if _, failure := handler.consumeResetCreditLocked(ctx, account, "manual-before-restart", "manual", nil); failure != nil {
+		t.Fatalf("consume failure: %+v", failure)
+	}
+	row, err := db.GetAccountByID(ctx, id)
+	if err != nil {
+		t.Fatalf("GetAccountByID: %v", err)
+	}
+	if row.GetCredential("auto_reset_low_balance_consumed_at") == "" {
+		t.Fatal("consumed episode was not persisted")
+	}
+
+	reloadedStore := auth.NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	if err := reloadedStore.Init(ctx); err != nil {
+		t.Fatalf("reloadedStore.Init: %v", err)
+	}
+	reloaded := reloadedStore.FindByID(id)
+	if reloaded == nil || reloaded.GetAutoResetLowBalanceState().ConsumedAt.IsZero() {
+		t.Fatalf("reloaded state = %+v", reloaded)
+	}
+	reloadedHandler := &Handler{store: reloadedStore}
+	decision, err := reloadedHandler.autoResetLowBalanceDecision(ctx, reloaded, now.Add(time.Minute), 10*time.Minute)
+	if err != nil || decision.Eligible {
+		t.Fatalf("decision after restart=%+v err=%v, want blocked", decision, err)
+	}
+}
+
+func TestLowBalanceValidatorRunsUnderLeaseAndRejectsChangedEpisode(t *testing.T) {
+	tc := cache.NewMemory(4)
+	t.Cleanup(func() { _ = tc.Close() })
+	store := auth.NewStore(nil, tc, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	now := time.Now()
+	account := &auth.Account{DBID: 28, AccountID: "workspace-final-check", AccessToken: "token", PlanType: "plus"}
+	account.SetUsageSnapshot7d(auth.UsageSnapshot7d{Percent: 99, Valid: true, ResetAt: now.Add(24 * time.Hour), UpdatedAt: now})
+	store.AddAccount(account)
+	handler := &Handler{store: store, cache: tc}
+	initial, err := handler.autoResetLowBalanceDecision(context.Background(), account, now, 10*time.Minute)
+	if err != nil || !initial.Eligible {
+		t.Fatalf("initial decision=%+v err=%v", initial, err)
+	}
+	account.MergeAutoResetLowBalanceState(auth.AutoResetLowBalanceState{ConsumedAt: now.Add(time.Second)})
+	upstreamCalled := false
+	handler.consumeResetCredit = func(context.Context, *auth.Account, string, string) (*proxy.WhamResetResult, *http.Response, error) {
+		upstreamCalled = true
+		return nil, nil, nil
+	}
+	validator := func(ctx context.Context) (bool, error) {
+		acquired, leaseErr := tc.AcquireLease(ctx, "reset-credit", resetCreditLockKey(account), "competing-owner", resetCreditLeaseTTL)
+		if leaseErr != nil {
+			return false, leaseErr
+		}
+		if acquired {
+			_ = tc.ReleaseLease(ctx, "reset-credit", resetCreditLockKey(account), "competing-owner")
+			t.Fatal("validator ran before the reset-credit lease was acquired")
+		}
+		current, decisionErr := handler.autoResetLowBalanceDecision(ctx, account, now, 10*time.Minute)
+		return current.Eligible && current.Episode == initial.Episode, decisionErr
+	}
+	outcome, failure := handler.consumeResetCreditLocked(context.Background(), account, stableAutoResetLowBalanceRequestID(account, initial.Episode), "auto", validator)
+	if failure != nil || !outcome.AlreadyHandled || upstreamCalled {
+		t.Fatalf("outcome=%+v failure=%+v upstreamCalled=%v", outcome, failure, upstreamCalled)
 	}
 }
 
@@ -378,7 +696,7 @@ func TestAutoResetCreditsSkipsImmediatelyAfterManualReset(t *testing.T) {
 
 	lock := manualHandler.resetCreditLock(account)
 	lock.Lock()
-	_, failure := manualHandler.consumeResetCreditLocked(context.Background(), account, "manual-request", "manual")
+	_, failure := manualHandler.consumeResetCreditLocked(context.Background(), account, "manual-request", "manual", nil)
 	lock.Unlock()
 	if failure != nil {
 		t.Fatalf("manual consume failure: %+v", failure)
@@ -408,11 +726,11 @@ func TestConsumeResetCreditLockedDoesNotReplaySuccessfulAutoRequestID(t *testing
 		probeUsage:         func(context.Context, *auth.Account) error { return nil },
 	}
 
-	first, failure := handler.consumeResetCreditLocked(context.Background(), account, "stable-auto-id", "auto")
+	first, failure := handler.consumeResetCreditLocked(context.Background(), account, "stable-auto-id", "auto", nil)
 	if failure != nil || first.AlreadyHandled {
 		t.Fatalf("first outcome=%+v failure=%+v", first, failure)
 	}
-	second, failure := handler.consumeResetCreditLocked(context.Background(), account, "stable-auto-id", "auto")
+	second, failure := handler.consumeResetCreditLocked(context.Background(), account, "stable-auto-id", "auto", nil)
 	if failure != nil || !second.AlreadyHandled {
 		t.Fatalf("second outcome=%+v failure=%+v", second, failure)
 	}
@@ -448,7 +766,7 @@ func TestConsumeResetCreditLockedHonorsSharedWorkspaceLease(t *testing.T) {
 			return nil, nil, nil
 		},
 	}
-	outcome, failure := second.consumeResetCreditLocked(context.Background(), account, "request-2", "auto")
+	outcome, failure := second.consumeResetCreditLocked(context.Background(), account, "request-2", "auto", nil)
 	if failure != nil || !outcome.InProgress || called {
 		t.Fatalf("outcome=%+v failure=%+v called=%v, want in-progress without upstream call", outcome, failure, called)
 	}
@@ -471,7 +789,7 @@ func TestAutoConsumeRechecksSharedCooldownAfterLease(t *testing.T) {
 		recordAccountEvent: func(int64, string, string) {},
 		probeUsage:         func(context.Context, *auth.Account) error { return nil },
 	}
-	if _, failure := manual.consumeResetCreditLocked(context.Background(), account, "manual-before-auto", "manual"); failure != nil {
+	if _, failure := manual.consumeResetCreditLocked(context.Background(), account, "manual-before-auto", "manual", nil); failure != nil {
 		t.Fatalf("manual consume failure: %+v", failure)
 	}
 
@@ -484,7 +802,7 @@ func TestAutoConsumeRechecksSharedCooldownAfterLease(t *testing.T) {
 			return nil, nil, nil
 		},
 	}
-	outcome, failure := automatic.consumeResetCreditLocked(context.Background(), account, "auto-after-query", "auto")
+	outcome, failure := automatic.consumeResetCreditLocked(context.Background(), account, "auto-after-query", "auto", nil)
 	if failure != nil || !outcome.AlreadyHandled || called {
 		t.Fatalf("outcome=%+v failure=%+v called=%v, want cooldown skip after lease", outcome, failure, called)
 	}
@@ -563,7 +881,7 @@ func TestConsumeResetCreditLockedRefreshes401WithSameRequestID(t *testing.T) {
 		},
 	}
 
-	outcome, failure := handler.consumeResetCreditLocked(context.Background(), account, "stable-request-id", "auto")
+	outcome, failure := handler.consumeResetCreditLocked(context.Background(), account, "stable-request-id", "auto", nil)
 	if failure != nil {
 		t.Fatalf("consumeResetCreditLocked failure: %+v", failure)
 	}

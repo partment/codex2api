@@ -632,7 +632,7 @@ func TestPersistUsageSnapshotDoesNotRequireMissing5hAfter7dOnly(t *testing.T) {
 	}
 	acc.recomputeEffectiveAutoPause(store)
 
-	store.PersistUsageSnapshot(acc, 20)
+	store.PersistUsageSnapshot7d(acc, UsageSnapshot7d{Percent: 20, Valid: true, UpdatedAt: time.Now()})
 	acc.MarkResetCreditsProbed(time.Now())
 
 	if acc.NeedsUsageProbe(10 * time.Minute) {

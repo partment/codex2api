@@ -8534,7 +8534,7 @@ func SyncCodexUsageState(store *auth.Store, account *auth.Account, resp *http.Re
 				return
 			}
 			if result.HasUsage7d {
-				store.PersistUsageSnapshot(account, result.UsagePct7d)
+				store.PersistUsageSnapshot7d(account, parsed.snapshot7d)
 				if result.UsagePct7d >= 100 {
 					result.Usage7dRateLimited = store.MarkUsage7dRateLimited(account)
 				}
@@ -8565,6 +8565,7 @@ type codexUsageHeaderParseResult struct {
 	usagePct7d float64
 	hasUsage7d bool
 	cleared5h  bool
+	snapshot7d auth.UsageSnapshot7d
 }
 
 type codexUsageHeaderObservation struct {
@@ -8640,9 +8641,14 @@ func applyCodexUsageHeaderObservation(store *auth.Store, account *auth.Account, 
 
 	if observation.w7d.valid {
 		resetAt := observedAt.Add(time.Duration(observation.w7d.resetSec) * time.Second)
-		account.SetReset7dAt(resetAt)
-		account.SetWindow7dSeconds(int64(observation.w7d.windowMin * 60))
-		account.SetUsagePercent7d(observation.w7d.usedPct)
+		out.snapshot7d = auth.UsageSnapshot7d{
+			Percent:       observation.w7d.usedPct,
+			Valid:         true,
+			ResetAt:       resetAt,
+			WindowSeconds: int64(observation.w7d.windowMin * 60),
+			UpdatedAt:     observedAt,
+		}
+		account.SetUsageSnapshot7d(out.snapshot7d)
 		out.usagePct7d = observation.w7d.usedPct
 		out.hasUsage7d = true
 	}
