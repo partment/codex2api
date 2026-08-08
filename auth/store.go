@@ -10197,7 +10197,17 @@ func isUsageLimitCooldownReason(reason string) bool {
 // ConfirmResponsesAvailable preserves the original API for callers whose
 // success evidence is current at call time.
 func (s *Store) ConfirmResponsesAvailable(acc *Account) bool {
-	return s.confirmResponsesAvailable(acc, time.Time{}, false)
+	if s == nil || acc == nil {
+		return false
+	}
+
+	// This compatibility API has no request start time. Order its success
+	// immediately after the latest observed limit; time.Now can equal that
+	// timestamp on Windows and incorrectly leave the account in cooldown.
+	acc.mu.RLock()
+	requestStartedAt := acc.LastRateLimitedAt.Add(time.Nanosecond)
+	acc.mu.RUnlock()
+	return s.ConfirmResponsesAvailableSince(acc, requestStartedAt)
 }
 
 // ConfirmResponsesAvailableSince clears only a usage/rate-limit cooldown when
