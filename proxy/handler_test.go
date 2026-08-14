@@ -2431,6 +2431,221 @@ func TestResponsesCompactUsesOpenAIResponsesAPIAccount(t *testing.T) {
 	}
 }
 
+func TestResponsesCompactCodexViaResponsesReturnsLegacyCompaction(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	previousSettings := CurrentRuntimeSettings()
+	settings := previousSettings
+	settings.CompactViaResponses = true
+	settings.CodexForceWebsocket = false
+	ApplyRuntimeSettings(settings)
+	t.Cleanup(func() { ApplyRuntimeSettings(previousSettings) })
+
+	previousResin := resinCfg.Load()
+	t.Cleanup(func() { resinCfg.Store(previousResin) })
+
+	var seenPath string
+	var seenBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenPath = r.URL.Path
+		seenBody = readUpstreamRequestBody(r)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, `data: {"type":"response.output_item.done","item":{"id":"cmp_test","type":"compaction","encrypted_content":"opaque-summary"}}`+"\n\n")
+		_, _ = io.WriteString(w, `data: {"type":"response.completed","response":{"id":"resp_compact_v2","object":"response","status":"completed","model":"gpt-5.6-sol","service_tier":"default","output":[],"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}`+"\n\n")
+	}))
+	defer upstream.Close()
+	SetResinConfig(&ResinConfig{BaseURL: upstream.URL, PlatformName: "test"})
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{
+		MaxConcurrency:      1,
+		MaxRetries:          0,
+		MaxRateLimitRetries: 0,
+	})
+	store.AddAccount(&auth.Account{
+		DBID:        1,
+		AccessToken: "at-1",
+		Models:      []string{"gpt-5.6-sol"},
+		PlanType:    "team",
+		Status:      auth.StatusReady,
+	})
+	handler := NewHandler(store, nil, nil, nil)
+
+	body := []byte(`{"model":"gpt-5.6-sol","input":[{"role":"developer","content":"Keep this"},{"role":"user","content":"Compact this"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses/compact", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = req
+
+	handler.ResponsesCompact(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.HasSuffix(seenPath, "/backend-api/codex/responses") {
+		t.Fatalf("upstream path = %q, want /backend-api/codex/responses", seenPath)
+	}
+	if !gjson.GetBytes(seenBody, "stream").Bool() || gjson.GetBytes(seenBody, "store").Bool() {
+		t.Fatalf("upstream body must use stream=true and store=false: %s", seenBody)
+	}
+	if !requestBodyHasCompactionTrigger(seenBody) {
+		t.Fatalf("upstream body missing compaction_trigger: %s", seenBody)
+	}
+	response := recorder.Body.Bytes()
+	if object := gjson.GetBytes(response, "object").String(); object != "response.compaction" {
+		t.Fatalf("response object = %q, want response.compaction; body=%s", object, response)
+	}
+	if output := gjson.GetBytes(response, "output").Array(); len(output) != 3 || output[2].Get("encrypted_content").String() != "opaque-summary" {
+		t.Fatalf("legacy compact output = %s", gjson.GetBytes(response, "output").Raw)
+	}
+}
+
+func TestResponsesCompactCodexViaResponsesUsesForcedWebsocket(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	previousSettings := CurrentRuntimeSettings()
+	settings := previousSettings
+	settings.CompactViaResponses = true
+	settings.CodexForceWebsocket = true
+	settings.CodexWSSizeRouter = false
+	ApplyRuntimeSettings(settings)
+	t.Cleanup(func() { ApplyRuntimeSettings(previousSettings) })
+
+	previousExec := WebsocketExecuteFunc
+	t.Cleanup(func() { WebsocketExecuteFunc = previousExec })
+	wsCalls := 0
+	var seenBody []byte
+	WebsocketExecuteFunc = func(_ context.Context, _ *auth.Account, requestBody []byte, _ string, _ string, _ string, _ *DeviceProfileConfig, _ http.Header, _ string) (*http.Response, error) {
+		wsCalls++
+		seenBody = append([]byte(nil), requestBody...)
+		sse := strings.Join([]string{
+			`data: {"type":"response.output_item.done","item":{"id":"cmp_ws","type":"compaction","encrypted_content":"ws-summary"}}`,
+			``,
+			`data: {"type":"response.completed","response":{"id":"resp_compact_ws","object":"response","status":"completed","model":"gpt-5.6-sol","output":[],"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}`,
+			``,
+		}, "\n")
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(sse)),
+		}, nil
+	}
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{
+		MaxConcurrency:      1,
+		MaxRetries:          0,
+		MaxRateLimitRetries: 0,
+	})
+	store.AddAccount(&auth.Account{
+		DBID:        1,
+		AccessToken: "at-1",
+		Models:      []string{"gpt-5.6-sol"},
+		PlanType:    "team",
+		Status:      auth.StatusReady,
+	})
+	handler := NewHandler(store, nil, nil, nil)
+
+	body := []byte(`{"model":"gpt-5.6-sol","input":[{"role":"developer","content":"Keep this"},{"role":"user","content":"Compact this"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses/compact", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = req
+
+	handler.ResponsesCompact(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", recorder.Code, recorder.Body.String())
+	}
+	if wsCalls != 1 {
+		t.Fatalf("WebsocketExecuteFunc calls = %d, want 1", wsCalls)
+	}
+	if !requestBodyHasCompactionTrigger(seenBody) {
+		t.Fatalf("WebSocket body missing compaction_trigger: %s", seenBody)
+	}
+	response := recorder.Body.Bytes()
+	if object := gjson.GetBytes(response, "object").String(); object != "response.compaction" {
+		t.Fatalf("response object = %q, want response.compaction; body=%s", object, response)
+	}
+	if got := gjson.GetBytes(response, "output.2.encrypted_content").String(); got != "ws-summary" {
+		t.Fatalf("compaction encrypted_content = %q, want ws-summary; body=%s", got, response)
+	}
+}
+
+func TestResponsesCompactCodexViaResponsesFallsBackToHTTPAfterWebsocket1009(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	previousSettings := CurrentRuntimeSettings()
+	settings := previousSettings
+	settings.CompactViaResponses = true
+	settings.CodexForceWebsocket = true
+	settings.CodexWSSizeRouter = false
+	ApplyRuntimeSettings(settings)
+	t.Cleanup(func() { ApplyRuntimeSettings(previousSettings) })
+
+	previousExec := WebsocketExecuteFunc
+	t.Cleanup(func() { WebsocketExecuteFunc = previousExec })
+	wsCalls := 0
+	WebsocketExecuteFunc = func(_ context.Context, _ *auth.Account, _ []byte, _ string, _ string, _ string, _ *DeviceProfileConfig, _ http.Header, _ string) (*http.Response, error) {
+		wsCalls++
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       errReadCloser{err: &websocket.CloseError{Code: websocket.CloseMessageTooBig, Text: "message too big"}},
+		}, nil
+	}
+
+	previousResin := resinCfg.Load()
+	t.Cleanup(func() { resinCfg.Store(previousResin) })
+	httpCalls := 0
+	var seenHTTPBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		httpCalls++
+		seenHTTPBody = readUpstreamRequestBody(r)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, `data: {"type":"response.output_item.done","item":{"id":"cmp_http","type":"compaction","encrypted_content":"http-summary"}}`+"\n\n")
+		_, _ = io.WriteString(w, `data: {"type":"response.completed","response":{"id":"resp_compact_http","object":"response","status":"completed","model":"gpt-5.6-sol","output":[],"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}`+"\n\n")
+	}))
+	defer upstream.Close()
+	SetResinConfig(&ResinConfig{BaseURL: upstream.URL, PlatformName: "test"})
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{
+		MaxConcurrency:      1,
+		MaxRetries:          0,
+		MaxRateLimitRetries: 0,
+	})
+	store.AddAccount(&auth.Account{
+		DBID:        1,
+		AccessToken: "at-1",
+		Models:      []string{"gpt-5.6-sol"},
+		PlanType:    "team",
+		Status:      auth.StatusReady,
+	})
+	handler := NewHandler(store, nil, nil, nil)
+
+	body := []byte(`{"model":"gpt-5.6-sol","input":[{"role":"user","content":"Compact this"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses/compact", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = req
+
+	handler.ResponsesCompact(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", recorder.Code, recorder.Body.String())
+	}
+	if wsCalls != 1 || httpCalls != 1 {
+		t.Fatalf("transport calls: websocket=%d http=%d, want 1/1", wsCalls, httpCalls)
+	}
+	if !requestBodyHasCompactionTrigger(seenHTTPBody) {
+		t.Fatalf("HTTP fallback body missing compaction_trigger: %s", seenHTTPBody)
+	}
+	if got := gjson.GetBytes(recorder.Body.Bytes(), "output.1.encrypted_content").String(); got != "http-summary" {
+		t.Fatalf("fallback compaction encrypted_content = %q, want http-summary; body=%s", got, recorder.Body.String())
+	}
+}
+
 func TestResponsesCompactAppliesAccountMappingBeforeSuffixFallback(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
