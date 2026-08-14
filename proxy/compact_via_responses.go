@@ -3,6 +3,7 @@ package proxy
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 
@@ -138,20 +139,30 @@ func isCanonicalCompactionTrigger(item gjson.Result) bool {
 }
 
 // collectCompactResponsesSSE 把 body-signal 压缩的上游 /responses SSE 流聚合成
-// compact 端点的一次性 JSON：取 response.completed 的 response 对象，并用沿途的
-// response.output_item.done（含 compaction 项）补齐 output。上游以 response.failed
-// 终止时原样返回该事件负载，由调用方按上游错误处理；流在终止事件前结束视为读错误。
-func collectCompactResponsesSSE(body io.Reader) (responseJSON []byte, failedPayload []byte, err error) {
-	outputItems := make([]json.RawMessage, 0, 2)
-	seenOutputItems := make(map[string]struct{})
-	var completed []byte
+// compact 端点的一次性 JSON。成功流必须恰好产生一个 compaction item；上游以
+// response.failed 终止时原样返回该事件负载，缺少终止事件则视为读错误。
+func collectCompactResponsesSSE(body io.Reader, requestBody []byte) (responseJSON []byte, failedPayload []byte, err error) {
+	var completedResponse []byte
+	var compactionItem json.RawMessage
+	compactionDoneCount := 0
+	completedSeen := false
 	readErr := ReadSSEStream(body, func(data []byte) bool {
-		if item, ok := extractResponseOutputItemDone(data, seenOutputItems); ok {
-			outputItems = append(outputItems, item)
-		}
-		switch gjson.GetBytes(data, "type").String() {
+		parsed := gjson.ParseBytes(data)
+		switch parsed.Get("type").String() {
+		case "response.output_item.done":
+			item := parsed.Get("item")
+			if strings.EqualFold(strings.TrimSpace(item.Get("type").String()), "compaction") {
+				compactionDoneCount++
+				if compactionItem == nil {
+					compactionItem = append(json.RawMessage(nil), item.Raw...)
+				}
+			}
 		case "response.completed":
-			completed = append([]byte(nil), data...)
+			completedSeen = true
+			response := parsed.Get("response")
+			if response.Exists() && response.IsObject() {
+				completedResponse = append([]byte(nil), response.Raw...)
+			}
 			return false
 		case "response.failed":
 			failedPayload = append([]byte(nil), data...)
@@ -165,12 +176,68 @@ func collectCompactResponsesSSE(body io.Reader) (responseJSON []byte, failedPayl
 	if len(failedPayload) > 0 {
 		return nil, failedPayload, nil
 	}
-	if len(completed) == 0 {
+	if !completedSeen {
 		return nil, nil, errors.New("upstream stream ended before terminal event")
 	}
-	responseObj := gjson.GetBytes(completed, "response")
-	if !responseObj.Exists() || !responseObj.IsObject() {
+	if len(completedResponse) == 0 {
 		return nil, nil, errors.New("response.completed missing response object")
 	}
-	return restoreMissingResponseOutputs([]byte(responseObj.Raw), outputItems), nil, nil
+
+	completedCompactionCount := 0
+	gjson.GetBytes(completedResponse, "output").ForEach(func(_, item gjson.Result) bool {
+		if strings.EqualFold(strings.TrimSpace(item.Get("type").String()), "compaction") {
+			completedCompactionCount++
+			if compactionItem == nil {
+				compactionItem = append(json.RawMessage(nil), item.Raw...)
+			}
+		}
+		return true
+	})
+	if compactionDoneCount > 1 || completedCompactionCount > 1 {
+		return nil, nil, fmt.Errorf("expected exactly one compaction output item, got done=%d completed=%d", compactionDoneCount, completedCompactionCount)
+	}
+	if compactionDoneCount == 0 && completedCompactionCount == 0 {
+		return nil, nil, errors.New("expected exactly one compaction output item, got none")
+	}
+
+	responseJSON, err = buildLegacyCompactionResponse(completedResponse, requestBody, compactionItem)
+	return responseJSON, nil, err
+}
+
+func buildLegacyCompactionResponse(responseJSON, requestBody []byte, compactionItem json.RawMessage) ([]byte, error) {
+	var response map[string]any
+	if err := json.Unmarshal(responseJSON, &response); err != nil {
+		return nil, fmt.Errorf("decode completed response: %w", err)
+	}
+
+	retained := make([]any, 0, 4)
+	input := gjson.GetBytes(requestBody, "input")
+	if input.IsArray() {
+		input.ForEach(func(_, item gjson.Result) bool {
+			if !item.IsObject() {
+				return true
+			}
+			itemType := strings.ToLower(strings.TrimSpace(item.Get("type").String()))
+			role := strings.ToLower(strings.TrimSpace(item.Get("role").String()))
+			keep := itemType == "agent_message" ||
+				(itemType == "message" && (role == "user" || role == "developer" || role == "system")) ||
+				(itemType == "" && (role == "user" || role == "developer" || role == "system"))
+			if keep {
+				var decoded any
+				if json.Unmarshal([]byte(item.Raw), &decoded) == nil {
+					retained = append(retained, decoded)
+				}
+			}
+			return true
+		})
+	}
+
+	var decodedCompaction any
+	if err := json.Unmarshal(compactionItem, &decodedCompaction); err != nil {
+		return nil, fmt.Errorf("decode compaction output item: %w", err)
+	}
+	retained = append(retained, decodedCompaction)
+	response["object"] = "response.compaction"
+	response["output"] = retained
+	return json.Marshal(response)
 }

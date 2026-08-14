@@ -910,6 +910,7 @@ func TestResponsesCompactContinuousRetrySelectsResponseFailedEvent(t *testing.T)
 			_, _ = io.WriteString(w, `data: {"type":"response.failed","response":{"id":"resp_failed_once","status":"failed","status_code":503,"error":{"code":"server_error","message":"temporary compact failure"}}}`+"\n\n")
 			return
 		}
+		_, _ = io.WriteString(w, `data: {"type":"response.output_item.done","item":{"id":"cmp_recovered","type":"compaction","encrypted_content":"recovered-summary"}}`+"\n\n")
 		_, _ = io.WriteString(w, `data: {"type":"response.completed","response":{"id":"resp_compact_recovered","status":"completed","output":[],"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}`+"\n\n")
 	}))
 	t.Cleanup(upstream.Close)
