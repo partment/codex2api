@@ -4019,7 +4019,7 @@
     "codexPriorityServiceTier": "Auto Fast on High Quota",
     "codexPriorityServiceTierDesc": "After account selection, use Fast for Codex text models when the fresh quota windows meet the configured minimum remaining quota. Known incompatible models are excluded, and Payload Rules can override this value.",
     "codexPriorityServiceTierMinRemainingRatio": "Minimum Remaining Quota for Auto Fast",
-    "codexPriorityServiceTierMinRemainingRatioDesc": "The fresh long-window quota, and the 5-hour window when present, must both have at least this much remaining. Range 0-100%; default 50%.",
+    "codexPriorityServiceTierMinRemainingRatioDesc": "At 0%, quota snapshots are not checked. Above 0%, the fresh long-window quota and the 5-hour window when present must both have at least this much remaining. Range 0-100%; default 50%.",
     "clientCompatMode": "Codex Client Compatibility",
     "clientCompatModeDesc": "preserve is the default and keeps the client UA; auto upgrades only outdated Codex CLI/TUI UA; force always uses a server-generated UA.",
     "clientCompatAuto": "Auto Compat",

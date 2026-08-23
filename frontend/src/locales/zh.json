@@ -4019,7 +4019,7 @@
     "codexPriorityServiceTier": "高余额自动 Fast",
     "codexPriorityServiceTierDesc": "账号调度后，Codex 文本模型在有效额度窗口达到设置的最低剩余额度时自动使用 Fast。已知不兼容的模型会被排除，Payload Rules 可覆盖此值。",
     "codexPriorityServiceTierMinRemainingRatio": "自动 Fast 最低剩余额度",
-    "codexPriorityServiceTierMinRemainingRatioDesc": "有效的长周期额度，以及存在时的 5 小时窗口，都必须至少剩余此比例。范围 0-100%，默认 50%。",
+    "codexPriorityServiceTierMinRemainingRatioDesc": "设为 0% 时不检查额度快照；大于 0% 时，有效的长周期额度以及存在时的 5 小时窗口都必须至少剩余此比例。范围 0-100%，默认 50%。",
     "clientCompatMode": "Codex 客户端兼容",
     "clientCompatModeDesc": "默认 preserve 保留客户端 UA；auto 只升级过旧 Codex CLI/TUI UA；force 始终使用服务端模拟 UA。",
     "clientCompatAuto": "自动兼容",

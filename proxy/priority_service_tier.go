@@ -28,6 +28,9 @@ func shouldApplyQuotaPriorityServiceTier(account *auth.Account, body []byte, max
 	if !supportsQuotaPriorityServiceTier(gjson.GetBytes(body, "model").String()) {
 		return false
 	}
+	if settings.CodexPriorityMinRemainingRatio == 0 {
+		return true
+	}
 
 	account.Mu().RLock()
 	pct7d := account.UsagePercent7d
