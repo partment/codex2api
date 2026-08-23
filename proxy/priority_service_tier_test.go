@@ -141,7 +141,7 @@ func TestQuotaPriorityServiceTierUsesConfiguredMinimumRemainingRatio(t *testing.
 		{name: "20 percent boundary", minRemainingRatio: 0.2, usedPercent: 80, want: true},
 		{name: "below 20 percent remaining", minRemainingRatio: 0.2, usedPercent: 80.1, want: false},
 		{name: "zero boundary", minRemainingRatio: 0, usedPercent: 100, want: true},
-		{name: "over quota at zero", minRemainingRatio: 0, usedPercent: 100.1, want: false},
+		{name: "zero ignores over-quota snapshot", minRemainingRatio: 0, usedPercent: 100.1, want: true},
 		{name: "full quota boundary", minRemainingRatio: 1, usedPercent: 0, want: true},
 		{name: "used quota at one", minRemainingRatio: 1, usedPercent: 0.1, want: false},
 	} {
@@ -153,6 +153,44 @@ func TestQuotaPriorityServiceTierUsesConfiguredMinimumRemainingRatio(t *testing.
 			got := shouldApplyQuotaPriorityServiceTier(account, body, 10*time.Minute, now)
 			if got != tc.want {
 				t.Fatalf("shouldApplyQuotaPriorityServiceTier() = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestQuotaPriorityServiceTierZeroRatioDoesNotRequireQuotaSnapshot(t *testing.T) {
+	previous := CurrentRuntimeSettings()
+	t.Cleanup(func() { ApplyRuntimeSettings(previous) })
+	settings := previous
+	settings.CodexPriorityServiceTierEnabled = true
+	settings.CodexPriorityMinRemainingRatio = 0
+	ApplyRuntimeSettings(settings)
+
+	now := time.Now()
+	accounts := map[string]*auth.Account{
+		"missing snapshot": {},
+		"stale snapshot": {
+			UsagePercent7d:      20,
+			UsagePercent7dValid: true,
+			Reset7dAt:           now.Add(6 * 24 * time.Hour),
+			UsageUpdatedAt:      now.Add(-time.Hour),
+			UsagePercent5h:      20,
+			UsagePercent5hValid: true,
+			Reset5hAt:           now.Add(4 * time.Hour),
+			UsageUpdatedAt5h:    now.Add(-time.Hour),
+		},
+		"pre-reset snapshot": {
+			UsagePercent7d:      20,
+			UsagePercent7dValid: true,
+			Reset7dAt:           now.Add(-time.Minute),
+			UsageUpdatedAt:      now.Add(-2 * time.Minute),
+		},
+	}
+
+	for name, account := range accounts {
+		t.Run(name, func(t *testing.T) {
+			if !shouldApplyQuotaPriorityServiceTier(account, []byte(`{"model":"gpt-5.6-sol"}`), 10*time.Minute, now) {
+				t.Fatal("zero minimum remaining ratio should not require a quota snapshot")
 			}
 		})
 	}
