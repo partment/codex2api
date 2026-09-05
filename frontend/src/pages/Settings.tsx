@@ -2048,6 +2048,7 @@ export default function Settings() {
     scheduler_engine: 'legacy',
     auto_reset_credits_enabled: false,
     auto_reset_credits_before_expiry_min: 60,
+    auto_reset_credits_low_balance_enabled: false,
     auto_activate_5h_window_enabled: false,
     codex_force_websocket: false,
     codex_request_compression: true,

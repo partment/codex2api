@@ -528,12 +528,18 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	}
 	resetUpstreamUserAgentAudit(ctx)
 	resetWsAcquireAudit(ctx)
+	autoFastRetryHeaders := headers
+	requestBody, autoFastFallbackBody, autoFastModel, autoFastFallback := consumeQuotaPriorityServiceTierMarker(requestBody)
+	payloadRuleIdentity := PayloadRuleIdentityFromContext(ctx)
+	if autoFastFallback {
+		autoFastFallback = quotaPriorityFallbackOwned(requestBody, autoFastFallbackBody, headers, payloadRuleIdentity)
+	}
 
 	// Payload 规则改写：在 WS/HTTP 分叉前统一应用，两条上游路径共享改写结果。
 	// 生图请求跳过——其 instructions/工具由网关自行构造，改写会破坏桥接协议。
 	if !responsesBodyRequestsImageGeneration(requestBody) {
 		RecordObservedInstructions(requestBody, headers)
-		requestBody = ApplyPayloadRulesToBody(requestBody, gjson.GetBytes(requestBody, "model").String(), headers, PayloadRuleIdentityFromContext(ctx))
+		requestBody = ApplyPayloadRulesToBody(requestBody, gjson.GetBytes(requestBody, "model").String(), headers, payloadRuleIdentity)
 		// 规则改写发生在各 handler 的 service_tier 净化之后，规则注入的 flex/auto 等
 		// 上游不接受的层级会原样发出并触发 400，这里补一次净化兜底。用量日志的
 		// requested tier 归因走 EffectiveRequestedServiceTier（净化前取值），不受影响。
@@ -592,7 +598,13 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 		// 出站前最后兜底：任何中间改写都不能把普通 input 项放到
 		// compaction_trigger 后面，否则上游直接返回 invalid_request_error。
 		requestBody = normalizeCompactionTriggerFinal(requestBody, false)
-		return WebsocketExecuteFunc(ctx, account, requestBody, sessionID, proxyOverride, apiKey, deviceCfg, headers, poolRouteKey)
+		resp, err := WebsocketExecuteFunc(ctx, account, requestBody, sessionID, proxyOverride, apiKey, deviceCfg, headers, poolRouteKey)
+		if !autoFastFallback {
+			return resp, err
+		}
+		return retryQuotaPriorityUnsupportedResponse(resp, err, autoFastModel, func() (*http.Response, error) {
+			return ExecuteRequest(ctx, account, autoFastFallbackBody, sessionID, proxyOverride, apiKey, deviceCfg, autoFastRetryHeaders, true)
+		})
 	}
 	if wantWebsocket && WebsocketExecuteFunc == nil {
 		// 请求/配置要求走 WebSocket，但 WS 执行器未注册（如嵌入式调用或初始化顺序问题）。
@@ -719,13 +731,23 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 		_ = resp.Body.Close()
 		if auth.IsAgentIdentityTaskInvalidResponse(resp.StatusCode, peeked) {
 			if regErr := EnsureCodexAgentIdentityTaskFunc(ctx, account, true); regErr == nil {
-				return send()
+				resp, err = send()
+				if err != nil {
+					return nil, err
+				}
+			} else {
+				resp.Body = io.NopCloser(bytes.NewReader(peeked))
 			}
+		} else {
+			resp.Body = io.NopCloser(bytes.NewReader(peeked))
 		}
-		// 非 task 失效或重注册失败：把已读走的 body 还原后原样返回给上层错误处理。
-		resp.Body = io.NopCloser(bytes.NewReader(peeked))
 	}
 
+	if autoFastFallback {
+		return retryQuotaPriorityUnsupportedResponse(resp, nil, autoFastModel, func() (*http.Response, error) {
+			return ExecuteRequest(ctx, account, autoFastFallbackBody, sessionID, proxyOverride, apiKey, deviceCfg, autoFastRetryHeaders, false)
+		})
+	}
 	return resp, nil
 }
 
