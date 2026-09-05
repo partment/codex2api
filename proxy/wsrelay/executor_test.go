@@ -244,6 +244,35 @@ func TestPrepareWebsocketBodyPreservesPreviousResponseID(t *testing.T) {
 	}
 }
 
+func TestPrepareWebsocketBodyStripsPromptCacheOptionsAtOutboundBoundary(t *testing.T) {
+	exec := NewExecutor()
+	raw := []byte(`{
+		"model":"gpt-5.4",
+		"prompt_cache_options":{"mode":"explicit"},
+		"prompt_cache_key":"keep-this-key",
+		"tools":[{
+			"type":"function",
+			"name":"inspect",
+			"parameters":{"type":"object","properties":{"prompt_cache_options":{"type":"string"}}}
+		}]
+	}`)
+
+	got := exec.prepareWebsocketBody(raw, "stateless-abc123")
+
+	if gjson.GetBytes(got, "prompt_cache_options").Exists() {
+		t.Fatalf("top-level prompt_cache_options should be stripped before Codex WS upstream: %s", got)
+	}
+	if key := gjson.GetBytes(got, "prompt_cache_key").String(); key != "keep-this-key" {
+		t.Fatalf("prompt_cache_key = %q, want keep-this-key; body=%s", key, got)
+	}
+	if !gjson.GetBytes(got, "tools.0.parameters.properties.prompt_cache_options").Exists() {
+		t.Fatalf("nested schema property should be preserved: %s", got)
+	}
+	if typ := gjson.GetBytes(got, "type").String(); typ != "response.create" {
+		t.Fatalf("type = %q, want response.create; body=%s", typ, got)
+	}
+}
+
 func TestPrepareWebsocketBodyKeepsCacheKeyForStatelessSession(t *testing.T) {
 	exec := NewExecutor()
 

@@ -649,9 +649,11 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 
 	// 2. 清理可能导致上游报错的多余字段
 	requestBody, _ = sjson.DeleteBytes(requestBody, "previous_response_id")
-	// 注意：HTTP /responses 上游不接受 prompt_cache_retention（会 400），必须删除；
-	// 该字段的 cache 收益只在 WS 路径注入（见 wsrelay 的 prepareWebsocketBody）。
+	// 注意：HTTP /responses 上游不接受 prompt_cache_retention 与
+	// prompt_cache_options（会 400），必须删除。后者剥离后不再保证调用端指定的
+	// 缓存控制语义，但 prompt_cache_key 是独立功能，仍按下方既有规则处理。
 	requestBody, _ = sjson.DeleteBytes(requestBody, "prompt_cache_retention")
+	requestBody, _ = sjson.DeleteBytes(requestBody, "prompt_cache_options")
 	requestBody, _ = sjson.DeleteBytes(requestBody, "safety_identifier")
 	requestBody, _ = sjson.DeleteBytes(requestBody, "disable_response_storage")
 	// 顶层 type 是 Responses WS 事件信封字段（response.create），native WS ingress 的
@@ -965,8 +967,9 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 		requestBody, _ = sjson.SetBytes(requestBody, "instructions", "")
 	}
 	requestBody, _ = sjson.DeleteBytes(requestBody, "previous_response_id")
-	// compact 端点同样走 HTTP，不接受 prompt_cache_retention，必须删除。
+	// compact 端点同样走 Codex HTTP 边界，沿用相同的提示缓存兼容过滤。
 	requestBody, _ = sjson.DeleteBytes(requestBody, "prompt_cache_retention")
+	requestBody, _ = sjson.DeleteBytes(requestBody, "prompt_cache_options")
 	requestBody, _ = sjson.DeleteBytes(requestBody, "safety_identifier")
 	requestBody, _ = sjson.DeleteBytes(requestBody, "disable_response_storage")
 	// 顶层 type 是 WS 事件信封字段，compact HTTP 端点同样不接受，兜底删除(issue #548)。

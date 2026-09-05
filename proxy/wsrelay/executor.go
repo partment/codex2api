@@ -291,8 +291,9 @@ func (e *Executor) prepareWebsocketBody(body []byte, sessionID string) []byte {
 		wsBody, _ = sjson.SetBytes(wsBody, "instructions", "")
 	}
 
-	// 2. 清理多余字段（prompt_cache_retention 上游不接受，会返回 400 Unsupported parameter，必须删除）
+	// 2. 沿用 Codex 出站兼容过滤；只删除顶层路径，不影响工具 schema。
 	wsBody, _ = sjson.DeleteBytes(wsBody, "prompt_cache_retention")
+	wsBody, _ = sjson.DeleteBytes(wsBody, "prompt_cache_options")
 	wsBody, _ = sjson.DeleteBytes(wsBody, "safety_identifier")
 	wsBody, _ = sjson.DeleteBytes(wsBody, "disable_response_storage")
 

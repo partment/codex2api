@@ -1803,6 +1803,117 @@ func TestResolveUpstreamSessionID(t *testing.T) {
 	}
 }
 
+// Codex HTTP 出站收口必须兜底剥离 prompt_cache_options，即使上层
+// translator 被绕过；普通 /responses 与 /responses/compact 共用该契约。
+func TestCodexHTTPExecutorsStripPromptCacheOptionsAtOutboundBoundary(t *testing.T) {
+	previousResin := resinCfg.Load()
+	t.Cleanup(func() { resinCfg.Store(previousResin) })
+
+	type capturedRequest struct {
+		path string
+		body []byte
+	}
+	requests := make(chan capturedRequest, 2)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- capturedRequest{path: r.URL.Path, body: readUpstreamRequestBody(r)}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_test"}`))
+	}))
+	t.Cleanup(upstream.Close)
+	SetResinConfig(&ResinConfig{BaseURL: upstream.URL, PlatformName: "test"})
+
+	raw := []byte(`{
+		"model":"gpt-5.4",
+		"input":[{"role":"user","content":"summarize"}],
+		"prompt_cache_options":{"mode":"explicit"},
+		"prompt_cache_key":"keep-this-key",
+		"tools":[{
+			"type":"function",
+			"name":"inspect",
+			"description":"Inspect a value.",
+			"parameters":{"type":"object","properties":{"prompt_cache_options":{"type":"string"}}}
+		}]
+	}`)
+	account := &auth.Account{DBID: 1, AccessToken: "token"}
+
+	resp, err := ExecuteRequest(context.Background(), account, raw, "", "", "sk-local", nil, http.Header{}, false)
+	if err != nil {
+		t.Fatalf("ExecuteRequest() error = %v", err)
+	}
+	resp.Body.Close()
+
+	resp, err = ExecuteCompactRequest(context.Background(), account, raw, "", "", "sk-local", nil, http.Header{})
+	if err != nil {
+		t.Fatalf("ExecuteCompactRequest() error = %v", err)
+	}
+	resp.Body.Close()
+
+	for i := 0; i < 2; i++ {
+		select {
+		case captured := <-requests:
+			if gjson.GetBytes(captured.body, "prompt_cache_options").Exists() {
+				t.Fatalf("%s: top-level prompt_cache_options reached Codex upstream: %s", captured.path, captured.body)
+			}
+			if key := gjson.GetBytes(captured.body, "prompt_cache_key").String(); key != "keep-this-key" {
+				t.Fatalf("%s: prompt_cache_key = %q, want keep-this-key; body=%s", captured.path, key, captured.body)
+			}
+			if !gjson.GetBytes(captured.body, "tools.0.parameters.properties.prompt_cache_options").Exists() {
+				t.Fatalf("%s: nested schema property should be preserved: %s", captured.path, captured.body)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for Codex upstream request")
+		}
+	}
+}
+
+func TestOpenAIResponsesExecutorsPreservePromptCacheOptions(t *testing.T) {
+	type capturedRequest struct {
+		path string
+		body []byte
+	}
+	requests := make(chan capturedRequest, 2)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- capturedRequest{path: r.URL.Path, body: readUpstreamRequestBody(r)}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_test"}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	account := &auth.Account{
+		DBID:         42,
+		UpstreamType: auth.UpstreamOpenAIResponses,
+		BaseURL:      upstream.URL,
+		APIKey:       "relay-token",
+	}
+	raw := []byte(`{"model":"gpt-4.1","input":"summarize","prompt_cache_options":{"mode":"explicit"},"prompt_cache_key":"keep-this-key"}`)
+
+	resp, err := ExecuteOpenAIResponsesRequest(context.Background(), account, raw, "", http.Header{})
+	if err != nil {
+		t.Fatalf("ExecuteOpenAIResponsesRequest() error = %v", err)
+	}
+	resp.Body.Close()
+
+	resp, err = ExecuteOpenAIResponsesCompactRequest(context.Background(), account, raw, "", http.Header{})
+	if err != nil {
+		t.Fatalf("ExecuteOpenAIResponsesCompactRequest() error = %v", err)
+	}
+	resp.Body.Close()
+
+	for i := 0; i < 2; i++ {
+		select {
+		case captured := <-requests:
+			if mode := gjson.GetBytes(captured.body, "prompt_cache_options.mode").String(); mode != "explicit" {
+				t.Fatalf("%s: prompt_cache_options.mode = %q, want explicit; body=%s", captured.path, mode, captured.body)
+			}
+			if key := gjson.GetBytes(captured.body, "prompt_cache_key").String(); key != "keep-this-key" {
+				t.Fatalf("%s: prompt_cache_key = %q, want keep-this-key; body=%s", captured.path, key, captured.body)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for OpenAI Responses upstream request")
+		}
+	}
+}
+
 // HTTP 出站收口必须兜底剥离 WS 事件信封的顶层 type，即使上层 prepare 被绕过
 // （native WS ingress 的 1009 降级 / 生图强制 HTTP / Agent Identity 强制 HTTP
 // 都会带信封 body 走到这里）；嵌套 type 不受影响 (issue #548)。

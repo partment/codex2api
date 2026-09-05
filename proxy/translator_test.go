@@ -4083,6 +4083,76 @@ func TestPrepareResponsesBodyStripsTopLevelWebSocketEnvelopeType(t *testing.T) {
 	}
 }
 
+func TestCodexResponsesPreparersStripTopLevelPromptCacheOptions(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.4",
+		"input":[{"role":"user","content":"summarize"}],
+		"prompt_cache_options":{"mode":"explicit"},
+		"prompt_cache_key":"keep-this-key",
+		"tools":[{
+			"type":"function",
+			"name":"inspect",
+			"description":"Inspect a value.",
+			"parameters":{"type":"object","properties":{"prompt_cache_options":{"type":"string"}}}
+		}]
+	}`)
+
+	for name, prepare := range map[string]func([]byte) ([]byte, string){
+		"http":    PrepareResponsesBody,
+		"ws":      PrepareResponsesWebSocketBody,
+		"compact": PrepareCompactResponsesBody,
+	} {
+		got, _ := prepare(raw)
+		if gjson.GetBytes(got, "prompt_cache_options").Exists() {
+			t.Fatalf("%s: top-level prompt_cache_options should be stripped: %s", name, got)
+		}
+		if key := gjson.GetBytes(got, "prompt_cache_key").String(); key != "keep-this-key" {
+			t.Fatalf("%s: prompt_cache_key = %q, want keep-this-key; body=%s", name, key, got)
+		}
+		if !gjson.GetBytes(got, "tools.0.parameters.properties.prompt_cache_options").Exists() {
+			t.Fatalf("%s: nested schema property should be preserved: %s", name, got)
+		}
+	}
+
+	withoutOption, _ := PrepareResponsesBody([]byte(`{"model":"gpt-5.4","input":"summarize","prompt_cache_key":"keep-this-key"}`))
+	if gjson.GetBytes(withoutOption, "prompt_cache_options").Exists() {
+		t.Fatalf("absent prompt_cache_options should not be synthesized: %s", withoutOption)
+	}
+	if key := gjson.GetBytes(withoutOption, "prompt_cache_key").String(); key != "keep-this-key" {
+		t.Fatalf("prompt_cache_key = %q, want keep-this-key; body=%s", key, withoutOption)
+	}
+}
+
+func TestOpenAIResponsesPreparersPreservePromptCacheOptions(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-4.1",
+		"input":"summarize",
+		"prompt_cache_options":{"mode":"explicit"},
+		"prompt_cache_key":"keep-this-key",
+		"tools":[{
+			"type":"function",
+			"name":"inspect",
+			"description":"Inspect a value.",
+			"parameters":{"type":"object","properties":{"prompt_cache_options":{"type":"string"}}}
+		}]
+	}`)
+
+	for name, got := range map[string][]byte{
+		"responses": PrepareOpenAIResponsesBody(raw),
+		"compact":   PrepareOpenAIResponsesCompactBody(raw),
+	} {
+		if mode := gjson.GetBytes(got, "prompt_cache_options.mode").String(); mode != "explicit" {
+			t.Fatalf("%s: prompt_cache_options.mode = %q, want explicit; body=%s", name, mode, got)
+		}
+		if key := gjson.GetBytes(got, "prompt_cache_key").String(); key != "keep-this-key" {
+			t.Fatalf("%s: prompt_cache_key = %q, want keep-this-key; body=%s", name, key, got)
+		}
+		if !gjson.GetBytes(got, "tools.0.parameters.properties.prompt_cache_options").Exists() {
+			t.Fatalf("%s: nested schema property should be preserved: %s", name, got)
+		}
+	}
+}
+
 func TestModelSupportsMaxReasoningEffort(t *testing.T) {
 	cases := map[string]bool{
 		"gpt-5.6-sol":              true,

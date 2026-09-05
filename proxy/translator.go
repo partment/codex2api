@@ -2410,8 +2410,11 @@ func prepareResponsesBodyWithOptions(rawBody []byte, opts responsesBodyPrepareOp
 	}
 
 	// 7. 删除 Codex 不支持的字段
-	// 注意：prompt_cache_retention 上游(HTTP 与 WS 路径)均不接受，会返回
-	// 400 Unsupported parameter，因此在此一并剥离，executor / wsrelay 层也各自兜底删除。
+	// 注意：prompt_cache_retention 已知不受 Codex 上游接受；prompt_cache_options
+	// 已在 HTTP /responses 重现 400。WS 与 compact 路径沿用同一 Codex 兼容边界，
+	// 但不把它们视为已分别实测；executor / wsrelay 层也各自兜底删除。
+	// prompt_cache_options 是调用端的缓存控制提示；剥离后不再保证该语义，但不会
+	// 停用所有缓存，且独立的 prompt_cache_key 仍按既有规则保留或注入。
 	// 顶层 type 是 Responses WS 事件信封字段(response.create)，native WS ingress 会
 	// 注入/保留它，HTTP /responses 上游不接受(400 Unsupported parameter: type)；
 	// WS 出站由 wsrelay 统一重设该字段，此处删除对 WS 路径无影响(issue #548)。
@@ -2423,7 +2426,7 @@ func prepareResponsesBodyWithOptions(rawBody []byte, opts responsesBodyPrepareOp
 		"logit_bias", "response_format", "serviceTier", "metadata",
 		"stream_options", "reasoning_effort", "truncation", "context_management",
 		"disable_response_storage", "verbosity",
-		"prompt_cache_retention", "safety_identifier", "type",
+		"prompt_cache_retention", "prompt_cache_options", "safety_identifier", "type",
 	} {
 		delete(body, field)
 	}
