@@ -417,7 +417,7 @@ func waitForContinuousPoolRetry(ctx context.Context) bool {
 }
 
 // waitForRetryAccountAvailable keeps one queue admission for the normal
-// 30-second wait, including continuous-retry SSE/WebSocket heartbeats.
+// Five-minute wait, including continuous-retry SSE/WebSocket heartbeats.
 func (h *Handler) waitForRetryAccountAvailable(ctx context.Context, affinityKey string, apiKeyID int64, exclude map[int64]bool, filter auth.AccountFilter, preserveBinding bool, policy auth.DispatchPolicy) (*auth.Account, string, error) {
 	account, proxyURL, _, err := h.waitForRetryAccountAvailableWithGuard(ctx, affinityKey, apiKeyID, exclude, filter, preserveBinding, policy)
 	return account, proxyURL, err
@@ -445,7 +445,7 @@ func (h *Handler) waitForRetryAccountAvailableWithGuard(ctx context.Context, aff
 			return step, nil
 		}
 	}
-	account, proxyURL, guard, err := h.store.WaitForDispatchAvailable(ctx, affinityKey, 30*time.Second, apiKeyID, exclude, filter, preserveBinding, policy, heartbeat)
+	account, proxyURL, guard, err := h.store.WaitForDispatchAvailable(ctx, affinityKey, 5*time.Minute, apiKeyID, exclude, filter, preserveBinding, policy, heartbeat)
 	account, proxyURL = guardRetryAccountContext(ctx, h.store.Release, account, proxyURL)
 	if account == nil {
 		guard = auth.SessionAffinityGuard{}
