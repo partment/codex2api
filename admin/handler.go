@@ -4420,7 +4420,7 @@ func fetchOpenAIResponsesModelIDs(ctx context.Context, baseURL, apiKey, proxyURL
 		return nil, fmt.Errorf("代理URL无效: %w", err)
 	}
 	client := &http.Client{
-		Transport: transport,
+		Transport: auth.WrapOutboundHeaderLog("openai-models-sync", transport),
 		Timeout:   20 * time.Second,
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)

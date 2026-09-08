@@ -1144,6 +1144,7 @@ func (m *Manager) createConnection(
 	m.sessions.Store(poolKey, session)
 
 	// 拨号连接
+	auth.LogOutboundWSHandshake("codex-ws", wsURL, headers)
 	conn, resp, err := dialer.DialContext(ctx, wsURL, headers)
 	if err != nil {
 		m.sessions.Delete(poolKey)

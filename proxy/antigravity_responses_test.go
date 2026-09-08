@@ -862,7 +862,7 @@ func TestAntigravityHTTPClientPoolIsPerAccountAndProxy(t *testing.T) {
 	if first.Timeout != 0 {
 		t.Fatalf("client timeout = %s, want context-controlled streaming", first.Timeout)
 	}
-	transport := first.Transport.(*http.Transport)
+	transport := auth.UnwrapOutboundHeaderLog(first.Transport).(*http.Transport)
 	if transport.ForceAttemptHTTP2 || transport.TLSNextProto == nil || len(transport.TLSNextProto) != 0 || len(transport.TLSClientConfig.NextProtos) != 0 {
 		t.Fatalf("transport is not forced to native HTTP/1.1 without ALPN: %#v", transport)
 	}

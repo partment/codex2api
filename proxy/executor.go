@@ -178,7 +178,7 @@ func releaseEvictedClient(client *http.Client) {
 	if client == nil {
 		return
 	}
-	if rt, ok := client.Transport.(*utlsRoundTripper); ok {
+	if rt, ok := client.Transport.(interface{ CloseAllConnections() }); ok {
 		rt.CloseAllConnections()
 		return
 	}
@@ -331,7 +331,7 @@ func getPooledClient(account *auth.Account, proxyURL string) *http.Client {
 		createdAt: time.Now().UnixNano(),
 		rotatable: transportMode == codexTransportModeStandard,
 		client: &http.Client{
-			Transport: transport,
+			Transport: auth.WrapOutboundHeaderLog("codex", transport),
 			// 不设整体超时：http.Client.Timeout 覆盖包括读响应体在内的完整
 			// 生命周期，流式回答超过上限会在数据正常传输中被切断（issue #287，
 			// 复杂任务单回合可超过 10 分钟）。生命周期由请求 context 控制

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
 	"github.com/codex2api/security"
 	"github.com/tidwall/gjson"
@@ -620,7 +621,7 @@ func SyncOfficialCodexModels(ctx context.Context, db *database.DB, proxyURL stri
 	if db == nil {
 		return nil, fmt.Errorf("数据库不可用，无法同步模型注册表")
 	}
-	client := &http.Client{Transport: newCodexStandardTransport(proxyURL), Timeout: 10 * time.Second}
+	client := &http.Client{Transport: auth.WrapOutboundHeaderLog("codex-models-sync", newCodexStandardTransport(proxyURL)), Timeout: 10 * time.Second}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, OfficialCodexModelsURL, nil)
 	if err != nil {
 		return nil, err

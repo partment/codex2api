@@ -360,7 +360,7 @@ func antigravityHTTPClient(accountID int64, proxyURL string) (*http.Client, erro
 		}
 	}
 
-	client := &http.Client{Transport: transport}
+	client := &http.Client{Transport: auth.WrapOutboundHeaderLog("antigravity", transport)}
 	actual, loaded := antigravityHTTPClients.LoadOrStore(key, client)
 	if loaded {
 		transport.CloseIdleConnections()

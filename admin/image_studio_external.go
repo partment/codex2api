@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
 	"github.com/codex2api/proxy"
 	"github.com/codex2api/security"
@@ -323,7 +324,7 @@ func fetchExternalInputImageAsDataURL(ctx context.Context, raw string) (string, 
 	req.Header.Set("Accept", "image/*")
 	client := &http.Client{
 		Timeout:       externalInputImageFetchTimeout,
-		Transport:     newExternalInputImageTransport(),
+		Transport:     auth.WrapOutboundHeaderLog("admin-image-fetch", newExternalInputImageTransport()),
 		CheckRedirect: rejectExternalInputImageRedirect,
 	}
 	resp, err := client.Do(req)

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/codex2api/auth"
 	"github.com/codex2api/cache"
 	"github.com/codex2api/security/promptfilter"
 	"github.com/gin-gonic/gin"
@@ -249,6 +250,7 @@ func (h *Handler) applyPromptSidecarWithState(ctx context.Context, text string, 
 	if key := strings.TrimSpace(os.Getenv("PROMPT_FILTER_SIDECAR_API_KEY")); key != "" {
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
+	auth.LogOutboundHTTPRequest("prompt-filter-sidecar", req)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		h.recordPromptExtensionFailure(ctx, breakerKey, sc.CircuitBreakerFailures, sc.CircuitBreakerSeconds)

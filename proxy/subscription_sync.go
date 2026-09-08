@@ -113,7 +113,7 @@ func QueryChatGPTSubscription(ctx context.Context, account *auth.Account, proxyU
 		client = resinClient
 	case useTestTransport:
 		// 测试用 httptest（明文 HTTP），uTLS 拨号无法使用，回退标准 transport。
-		client = &http.Client{Transport: newCodexStandardTransport(proxyURL)}
+		client = &http.Client{Transport: auth.WrapOutboundHeaderLog("subscription-sync", newCodexStandardTransport(proxyURL))}
 	default:
 		client = getMaintenanceClient(account, proxyURL, maintenancePurposeSubscription, true)
 	}

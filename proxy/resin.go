@@ -152,6 +152,7 @@ func InheritLease(tempAccount, newAccount string) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
+	auth.LogOutboundHTTPRequest("resin-inherit-lease", req)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		log.Printf("[Resin] inherit-lease 请求失败: %v", err)
@@ -189,7 +190,7 @@ func getResinHTTPClient(account *auth.Account) *http.Client {
 
 	entry := &poolEntry{
 		client: &http.Client{
-			Transport: transport,
+			Transport: auth.WrapOutboundHeaderLog("resin", transport),
 			Timeout:   0, // 流式响应不设超时
 		},
 	}

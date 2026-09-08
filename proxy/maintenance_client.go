@@ -72,7 +72,7 @@ func getMaintenanceClient(account *auth.Account, proxyURL, purpose string, force
 
 	entry := &poolEntry{
 		client: &http.Client{
-			Transport: transport,
+			Transport: auth.WrapOutboundHeaderLog("codex-maintenance", transport),
 			// 不设整体超时：各调用方都用 context 控制超时（wham 25s、清单 15s、
 			// search 120s、订阅 15s），与 /responses 池的语义保持一致。
 			Timeout: 0,

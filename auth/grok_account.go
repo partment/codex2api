@@ -890,7 +890,7 @@ func ExchangeGrokAuthorizationCode(ctx context.Context, params GrokExchangeCodeP
 	if err := ConfigureTransportProxy(transport, params.ProxyURL, nil); err != nil {
 		return nil, fmt.Errorf("grok 授权兑换代理配置失败: %w", err)
 	}
-	client := &http.Client{Transport: transport, Timeout: 30 * time.Second}
+	client := &http.Client{Transport: WrapOutboundHeaderLog("grok", transport), Timeout: 30 * time.Second}
 
 	endpoint, err := grokResolveTokenEndpoint(ctx, client, params.TokenEndpoint, params.OIDCIssuer)
 	if err != nil {
@@ -1167,7 +1167,7 @@ func RefreshGrokAccessToken(ctx context.Context, params GrokRefreshParams) (*Gro
 	if err := ConfigureTransportProxy(transport, params.ProxyURL, nil); err != nil {
 		return nil, fmt.Errorf("grok 刷新代理配置失败: %w", err)
 	}
-	client := &http.Client{Transport: transport, Timeout: 30 * time.Second}
+	client := &http.Client{Transport: WrapOutboundHeaderLog("grok", transport), Timeout: 30 * time.Second}
 
 	endpoint, err := grokResolveTokenEndpoint(ctx, client, params.TokenEndpoint, params.OIDCIssuer)
 	if err != nil {

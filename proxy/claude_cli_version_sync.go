@@ -84,7 +84,7 @@ func fetchClaudeJSON(ctx context.Context, endpoint string, transport http.RoundT
 		req.Header.Set("Accept", "application/vnd.github+json")
 		ApplyGithubAuth(req)
 	}
-	client := &http.Client{Transport: transport, Timeout: 20 * time.Second}
+	client := &http.Client{Transport: auth.WrapOutboundHeaderLog("claude-version-sync", transport), Timeout: 20 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
