@@ -2945,7 +2945,7 @@ func TestResponsesCompactAutoFastHonorsPayloadRuleTierOverride(t *testing.T) {
 		_, _ = w.Write([]byte(`{
 			"id":"resp_compact_auto_fast",
 			"object":"response",
-			"model":"gpt-5.4",
+			"model":"gpt-5.5",
 			"output":[],
 			"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5},
 			"service_tier":"default"
@@ -2962,7 +2962,7 @@ func TestResponsesCompactAutoFastHonorsPayloadRuleTierOverride(t *testing.T) {
 	account := &auth.Account{
 		DBID:        1,
 		AccessToken: "at-1",
-		Models:      []string{"gpt-5.4"},
+		Models:      []string{"gpt-5.5"},
 		PlanType:    "team",
 		Status:      auth.StatusReady,
 	}
@@ -2972,7 +2972,7 @@ func TestResponsesCompactAutoFastHonorsPayloadRuleTierOverride(t *testing.T) {
 	store.AddAccount(account)
 	handler := NewHandler(store, nil, nil, nil)
 
-	body := []byte(`{"model":"gpt-5.4","input":"hello"}`)
+	body := []byte(`{"model":"gpt-5.5","input":"hello"}`)
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses/compact", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
