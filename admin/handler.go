@@ -10031,6 +10031,8 @@ func (h *Handler) GetSettings(c *gin.Context) {
 	autoActivate5hWindowEnabled := runtimeCfg.AutoActivate5hWindowEnabled
 	codexPriorityServiceTierEnabled := runtimeCfg.CodexPriorityServiceTierEnabled
 	codexPriorityMinRemainingRatio := runtimeCfg.CodexPriorityMinRemainingRatio
+	codexTelemetryEnabled := runtimeCfg.CodexTelemetryEnabled
+	codexTelemetryTimingDebug := runtimeCfg.CodexTelemetryTimingDebug
 	// uTLS 优雅关闭等待上限（issue #446）：与自动消费同款，数据库是多实例下的权威来源。
 	utlsShutdownTimeoutMinutes := runtimeCfg.UTLSShutdownTimeoutMin
 	if dbSettings != nil {
@@ -10040,6 +10042,8 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		autoActivate5hWindowEnabled = dbSettings.AutoActivate5hWindowEnabled
 		codexPriorityServiceTierEnabled = dbSettings.CodexPriorityServiceTierEnabled
 		codexPriorityMinRemainingRatio = database.NormalizeCodexPriorityMinRemainingRatio(dbSettings.CodexPriorityMinRemainingRatio)
+		codexTelemetryEnabled = dbSettings.CodexTelemetryEnabled
+		codexTelemetryTimingDebug = dbSettings.CodexTelemetryTimingDebug
 		utlsShutdownTimeoutMinutes = database.NormalizeUTLSShutdownTimeoutMinutes(dbSettings.UTLSShutdownTimeoutMinutes)
 	}
 	imgCfg := imagestore.CurrentConfig()
@@ -10194,8 +10198,8 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		ClientCompatMode:                    runtimeCfg.ClientCompatMode,
 		CodexMinCLIVersion:                  runtimeCfg.CodexMinCLIVersion,
 		CodexUserAgentConfig:                runtimeCfg.CodexUserAgentConfig,
-		CodexTelemetryEnabled:               runtimeCfg.CodexTelemetryEnabled,
-		CodexTelemetryTimingDebug:           runtimeCfg.CodexTelemetryTimingDebug,
+		CodexTelemetryEnabled:               codexTelemetryEnabled,
+		CodexTelemetryTimingDebug:           codexTelemetryTimingDebug,
 		UsageLogMode:                        h.db.GetUsageLogMode(),
 		UsageLogBatchSize:                   h.db.GetUsageLogBatchSize(),
 		UsageLogFlushIntervalSeconds:        h.db.GetUsageLogFlushIntervalSeconds(),
@@ -10520,6 +10524,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	codexImagesMainModel := ""
 	persistedCodexPriorityServiceTierEnabled := false
 	persistedCodexPriorityMinRemainingRatio := database.DefaultCodexPriorityMinRemainingRatio
+	persistedCodexTelemetryEnabled := false
+	persistedCodexTelemetryTimingDebug := false
 	persistedUTLSShutdownTimeoutMinutes := database.NormalizeUTLSShutdownTimeoutMinutes(0)
 	modelsListReadMaxBytes := database.DefaultModelsListReadMaxBytes
 	sessionSlotBufferEnabled := h.store.SessionSlotBufferEnabled()
@@ -10547,6 +10553,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		codexImagesMainModel = existingSettings.CodexImagesMainModel
 		persistedCodexPriorityServiceTierEnabled = existingSettings.CodexPriorityServiceTierEnabled
 		persistedCodexPriorityMinRemainingRatio = database.NormalizeCodexPriorityMinRemainingRatio(existingSettings.CodexPriorityMinRemainingRatio)
+		persistedCodexTelemetryEnabled = existingSettings.CodexTelemetryEnabled
+		persistedCodexTelemetryTimingDebug = existingSettings.CodexTelemetryTimingDebug
 		persistedUTLSShutdownTimeoutMinutes = database.NormalizeUTLSShutdownTimeoutMinutes(existingSettings.UTLSShutdownTimeoutMinutes)
 		modelsListReadMaxBytes = database.NormalizeModelsListReadMaxBytes(existingSettings.ModelsListReadMaxBytes)
 		sessionSlotBufferEnabled = existingSettings.SessionSlotBufferEnabled
@@ -10623,6 +10631,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	previousAutoActivate5hWindowEnabled := runtimeCfg.AutoActivate5hWindowEnabled
 	previousCodexPriorityServiceTierEnabled := runtimeCfg.CodexPriorityServiceTierEnabled
 	previousCodexPriorityMinRemainingRatio := runtimeCfg.CodexPriorityMinRemainingRatio
+	previousCodexTelemetryEnabled := runtimeCfg.CodexTelemetryEnabled
+	previousCodexTelemetryTimingDebug := runtimeCfg.CodexTelemetryTimingDebug
 	// 数据库是多实例下的权威来源；用持久值作为本次 partial update 的基线，
 	// 避免旧实例保存无关字段时把自动消费或自动 Fast 配置回滚成自己的陈旧快照。
 	runtimeCfg.AutoResetCreditsEnabled = persistedAutoResetCreditsEnabled
@@ -10631,6 +10641,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	runtimeCfg.AutoActivate5hWindowEnabled = persistedAutoActivate5hWindowEnabled
 	runtimeCfg.CodexPriorityServiceTierEnabled = persistedCodexPriorityServiceTierEnabled
 	runtimeCfg.CodexPriorityMinRemainingRatio = persistedCodexPriorityMinRemainingRatio
+	runtimeCfg.CodexTelemetryEnabled = persistedCodexTelemetryEnabled
+	runtimeCfg.CodexTelemetryTimingDebug = persistedCodexTelemetryTimingDebug
 	runtimeCfg.UTLSShutdownTimeoutMin = persistedUTLSShutdownTimeoutMinutes
 	runtimeCfg.ModelsListReadMaxBytes = modelsListReadMaxBytes
 	continuousRetryPolicy := h.store.GetContinuousRetryPolicy()
@@ -10652,6 +10664,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		*req.CodexPriorityServiceTierEnabled != persistedCodexPriorityServiceTierEnabled) ||
 		(req.CodexPriorityMinRemainingRatio != nil &&
 			*req.CodexPriorityMinRemainingRatio != persistedCodexPriorityMinRemainingRatio)
+	codexTelemetryChanged := (req.CodexTelemetryEnabled != nil && *req.CodexTelemetryEnabled != persistedCodexTelemetryEnabled) ||
+		(req.CodexTelemetryTimingDebug != nil && *req.CodexTelemetryTimingDebug != persistedCodexTelemetryTimingDebug)
 	usageLogMode := h.db.GetUsageLogMode()
 	usageLogBatchSize := h.db.GetUsageLogBatchSize()
 	usageLogFlushIntervalSeconds := h.db.GetUsageLogFlushIntervalSeconds()
@@ -11403,10 +11417,14 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	if autoActivate5hChanged {
 		effectiveRuntimeCfg.AutoActivate5hWindowEnabled = previousAutoActivate5hWindowEnabled
 	}
-	// 自动 Fast 也等数据库确认保存成功后再发布，避免运行态与持久值分裂。
+	// 自动 Fast 与遥测开关也等数据库确认保存成功后再发布，避免运行态与持久值分裂。
 	if codexPriorityServiceTierChanged {
 		effectiveRuntimeCfg.CodexPriorityServiceTierEnabled = previousCodexPriorityServiceTierEnabled
 		effectiveRuntimeCfg.CodexPriorityMinRemainingRatio = previousCodexPriorityMinRemainingRatio
+	}
+	if codexTelemetryChanged {
+		effectiveRuntimeCfg.CodexTelemetryEnabled = previousCodexTelemetryEnabled
+		effectiveRuntimeCfg.CodexTelemetryTimingDebug = previousCodexTelemetryTimingDebug
 	}
 	effectiveRuntimeCfg = proxy.UpdateRuntimeSettings(func(current proxy.RuntimeSettings) proxy.RuntimeSettings {
 		// CodexSyncedCLIVersion 由后台同步任务独立维护；管理员保存其他设置时
@@ -11805,6 +11823,11 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 			writeError(c, http.StatusInternalServerError, "保存高余额自动 Fast 设置失败，设置未生效")
 			return
 		}
+		if codexTelemetryChanged {
+			runtimeCfg = effectiveRuntimeCfg
+			writeError(c, http.StatusInternalServerError, "保存 Codex 遥测设置失败，设置未生效")
+			return
+		}
 	} else {
 		if req.SessionSlotBufferSeconds != nil {
 			h.store.SetSessionSlotBuffer(time.Duration(sessionSlotBufferSeconds) * time.Second)
@@ -11861,7 +11884,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 			}
 			log.Printf("设置已更新: prompt_filter enabled=%t mode=%s threshold=%d", promptFilterCfg.Enabled, promptFilterCfg.Mode, promptFilterCfg.Threshold)
 		}
-		if autoResetCreditsChanged || codexPriorityServiceTierChanged {
+		if autoResetCreditsChanged || codexPriorityServiceTierChanged || codexTelemetryChanged {
 			runtimeCfg = proxy.UpdateRuntimeSettings(func(current proxy.RuntimeSettings) proxy.RuntimeSettings {
 				runtimeCfg.CodexSyncedCLIVersion = current.CodexSyncedCLIVersion
 				return runtimeCfg

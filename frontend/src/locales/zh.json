@@ -4178,7 +4178,7 @@
     "codexCliVersionAutoSync": "定时自动同步",
     "codexCliVersionAutoSyncDesc": "开启后按下方间隔在后台自动拉取并更新模拟版本；关闭后仅保留手动「立即同步」。环境变量 CODEX_DISABLE_CLI_VERSION_SYNC=1 可强制关闭。",
     "codexTelemetry": "客户端遥测(实验性)",
-    "codexTelemetryDesc": "使用所选客户端身份发送模拟的 Codex 分析事件与 OTLP 指标。事件是合成的，不来自真实工具调用。默认关闭；可用 CODEX_TELEMETRY_ENABLED=false 在部署层强制关闭。",
+    "codexTelemetryDesc": "使用所选客户端身份发送模拟的 Codex 分析事件与 OTLP 指标。事件是合成的，不来自真实工具调用。默认关闭；可用 CODEX_TELEMETRY_ENABLED=false 或 CODEX_TELEMETRY_DISABLED=1 在部署层强制关闭。",
     "codexTelemetryTiming": "遥测计时探针（临时）",
     "codexTelemetryTimingDesc": "仅诊断用：打印 [TELEMETRY-TIMING] 日志（请求入口、启动指标构建、流式解析耗时）。默认关闭、关闭时零开销；也可用 CODEX_TELEMETRY_TIMING_DEBUG=1 开启。",
     "codexCliVersionSyncInterval": "自动同步间隔",

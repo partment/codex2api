@@ -232,7 +232,7 @@
     "codexOAuthKeepalive": "惰性模式下保持 Codex 授權",
     "codexOAuthKeepaliveDesc": "開啟後，惰性模式仍會為即將到期的 Codex Token 續期，包括額度冷卻中的帳號；不會解除冷卻或發送生成請求。預設關閉。",
     "codexTelemetry": "用戶端遙測（實驗性）",
-    "codexTelemetryDesc": "使用所選用戶端身分傳送模擬的 Codex 分析事件與 OTLP 指標。事件為合成，並非來自真實工具呼叫。預設關閉；可用 CODEX_TELEMETRY_ENABLED=false 在部署層強制關閉。",
+    "codexTelemetryDesc": "使用所選用戶端身分傳送模擬的 Codex 分析事件與 OTLP 指標。事件為合成，並非來自真實工具呼叫。預設關閉；可用 CODEX_TELEMETRY_ENABLED=false 或 CODEX_TELEMETRY_DISABLED=1 在部署層強制關閉。",
     "codexTelemetryTiming": "遙測計時探針（臨時）",
     "codexTelemetryTimingDesc": "僅診斷用：列印 [TELEMETRY-TIMING] 日誌（請求入口、啟動指標建構、串流解析耗時）。預設關閉、關閉時零開銷；也可用 CODEX_TELEMETRY_TIMING_DEBUG=1 開啟。",
     "pricing": {

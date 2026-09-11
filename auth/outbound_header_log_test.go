@@ -52,17 +52,18 @@ func TestMaskOutboundHeaderValue(t *testing.T) {
 
 func TestFormatOutboundHeadersSortsAndMasks(t *testing.T) {
 	headers := http.Header{
-		"User-Agent":    {"codex/1.0"},
-		"Authorization": {"Bearer secret-token-value"},
-		"Cookie":        {"sessionKey=abc123"},
-		"Content-Type":  {"application/json"},
+		"User-Agent":      {"codex/1.0"},
+		"Authorization":   {"Bearer secret-token-value"},
+		"Cookie":          {"sessionKey=abc123"},
+		"Content-Type":    {"application/json"},
+		"Statsig-Api-Key": {"client-secret-statsig-value"},
 	}
 	got := formatOutboundHeaders(headers)
-	want := "Authorization: Bear***alue; Content-Type: application/json; Cookie: sess***c123; User-Agent: codex/1.0"
+	want := "Authorization: Bear***alue; Content-Type: application/json; Cookie: sess***c123; Statsig-Api-Key: clie***alue; User-Agent: codex/1.0"
 	if got != want {
 		t.Fatalf("formatOutboundHeaders = %q, want %q", got, want)
 	}
-	if strings.Contains(got, "secret-token-value") || strings.Contains(got, "abc123") {
+	if strings.Contains(got, "secret-token-value") || strings.Contains(got, "abc123") || strings.Contains(got, "client-secret-statsig-value") {
 		t.Fatalf("sensitive values leaked into header log: %q", got)
 	}
 }

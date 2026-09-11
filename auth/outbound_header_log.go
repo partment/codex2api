@@ -34,6 +34,7 @@ var outboundHeaderSensitive = map[string]bool{
 	"x-goog-api-key":      true,
 	"x-session-key":       true,
 	"session-key":         true,
+	"statsig-api-key":     true,
 	"x-auth-token":        true,
 	"x-access-token":      true,
 }
