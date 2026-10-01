@@ -316,7 +316,6 @@ func (h *Handler) applyClaudeOAuthUsage(account *auth.Account, windows []auth.Cl
 	}
 	observedAt := time.Now()
 	var has7d, has5h bool
-	var pct7d float64
 	account.ApplyUsageObservation(observedAt, func() {
 		for _, window := range windows {
 			switch window.Name {
@@ -324,17 +323,16 @@ func (h *Handler) applyClaudeOAuthUsage(account *auth.Account, windows []auth.Cl
 				account.SetUsageSnapshot5hAt(window.Utilization, window.ResetAt, observedAt)
 				has5h = true
 			case "7d":
-				account.SetUsageSnapshot(window.Utilization, observedAt)
-				pct7d = window.Utilization
-				if !window.ResetAt.IsZero() {
-					account.SetReset7dAt(window.ResetAt)
-				}
+				account.SetUsageSnapshot7d(auth.UsageSnapshot7d{
+					Percent: window.Utilization, Valid: true, ResetAt: window.ResetAt,
+					WindowSeconds: 7 * 24 * 60 * 60, UpdatedAt: observedAt,
+				})
 				has7d = true
 			}
 		}
 		if h != nil && h.store != nil {
 			if has7d {
-				h.store.PersistUsageSnapshot(account, pct7d)
+				h.store.PersistUsageSnapshot7d(account, account.GetUsageSnapshot7d())
 			} else if has5h {
 				h.store.PersistUsageSnapshot5hOnly(account)
 			}

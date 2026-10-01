@@ -2305,6 +2305,8 @@ export interface SystemSettings {
   first_token_excludes_ws_acquire: boolean
   billing_tier_policy: 'actual' | 'requested' | string
   models_list_read_max_bytes: number
+  codex_priority_service_tier_enabled: boolean
+  codex_priority_service_tier_min_remaining_ratio: number
   show_full_usage_numbers: boolean
   show_upstream_model_mismatch: boolean
   public_key_usage_page_enabled: boolean

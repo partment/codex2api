@@ -21,6 +21,7 @@ import {
   findClaudeTimezoneOption,
 } from '../lib/claudeAccountOptions'
 import { buildWritableSettingsPayload } from '../lib/settingsPayload'
+import { DEFAULT_AUTO_FAST_MIN_REMAINING_RATIO, normalizeAutoFastMinRemainingRatio } from '../lib/autoFastSettings'
 import {
   buildContinuousRetryCatchAllPatch,
   buildContinuousRetryEnabledPatch,
@@ -2561,6 +2562,9 @@ export default function Settings() {
         Number.isFinite(cacheNormalized.models_list_read_max_bytes) && cacheNormalized.models_list_read_max_bytes >= MIB
           ? cacheNormalized.models_list_read_max_bytes
           : DEFAULT_MODELS_LIST_READ_MAX_BYTES,
+      codex_priority_service_tier_min_remaining_ratio: normalizeAutoFastMinRemainingRatio(
+        cacheNormalized.codex_priority_service_tier_min_remaining_ratio,
+      ),
     }
     if (!normalized.lazy_mode) {
       return normalized
@@ -2719,6 +2723,8 @@ export default function Settings() {
     first_token_excludes_ws_acquire: false,
     billing_tier_policy: 'actual',
     models_list_read_max_bytes: DEFAULT_MODELS_LIST_READ_MAX_BYTES,
+    codex_priority_service_tier_enabled: false,
+    codex_priority_service_tier_min_remaining_ratio: DEFAULT_AUTO_FAST_MIN_REMAINING_RATIO,
     show_full_usage_numbers: false,
     show_upstream_model_mismatch: true,
     public_key_usage_page_enabled: true,
@@ -6115,6 +6121,41 @@ export default function Settings() {
                         value={settingsForm.billing_tier_policy}
                         onChange={(value) => autoSaveStringField('billing_tier_policy', value)}
                         options={billingTierPolicyOptions}
+                      />
+                    </SettingField>
+                    <SettingField
+                      label={t('settings.codexPriorityServiceTier')}
+                      description={t('settings.codexPriorityServiceTierDesc')}
+                      layout="switch"
+                      channels={CHANNELS_CODEX_ONLY}
+                    >
+                      <Switch
+                        checked={settingsForm.codex_priority_service_tier_enabled}
+                        aria-label={t('settings.codexPriorityServiceTier')}
+                        onCheckedChange={(checked) => autoSaveBooleanField('codex_priority_service_tier_enabled', checked)}
+                      />
+                    </SettingField>
+                    <SettingField
+                      label={t('settings.codexPriorityServiceTierMinRemainingRatio')}
+                      description={t('settings.codexPriorityServiceTierMinRemainingRatioDesc')}
+                      suffix="%"
+                      channels={CHANNELS_CODEX_ONLY}
+                      className={cn(!settingsForm.codex_priority_service_tier_enabled && 'opacity-60')}
+                    >
+                      <DraftNumberInput
+                        min={0}
+                        max={100}
+                        step={0.1}
+                        inputMode="decimal"
+                        integer={false}
+                        disabled={!settingsForm.codex_priority_service_tier_enabled}
+                        aria-label={t('settings.codexPriorityServiceTierMinRemainingRatio')}
+                        value={settingsForm.codex_priority_service_tier_min_remaining_ratio * 100}
+                        formatValue={(value) => Number(value.toFixed(10)).toString()}
+                        onValueChange={() => undefined}
+                        onValueCommit={(value) => {
+                          void autoSaveSettingsPatch({ codex_priority_service_tier_min_remaining_ratio: value / 100 })
+                        }}
                       />
                     </SettingField>
                     <SettingField label={t('settings.modelsListReadMaxBytes')} description={t('settings.modelsListReadMaxBytesDesc')} channels={CHANNELS_CODEX_ONLY}>

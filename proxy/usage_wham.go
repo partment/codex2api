@@ -713,13 +713,15 @@ func ApplyWhamUsage(store *auth.Store, account *auth.Account, usage *WhamUsage) 
 
 			if w7d != nil {
 				resetAt := whamWindowResetAt(w7d, observedAt)
-				account.SetReset7dAt(resetAt)
-				account.SetWindow7dSeconds(w7d.LimitWindowSeconds)
+				snapshot := auth.UsageSnapshot7d{
+					Percent: w7d.UsedPercent, Valid: true, ResetAt: resetAt,
+					WindowSeconds: w7d.LimitWindowSeconds, UpdatedAt: observedAt,
+				}
+				store.PersistUsageSnapshot7d(account, snapshot)
 				result.UsagePct7d = w7d.UsedPercent
 				result.HasUsage7d = true
 				if store != nil {
 					store.WakeBoundaryProbe(resetAt)
-					store.PersistUsageSnapshot(account, w7d.UsedPercent)
 					if result.UsagePct7d >= 100 {
 						result.Usage7dRateLimited = store.MarkUsage7dRateLimited(account)
 					}
