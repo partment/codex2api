@@ -9328,6 +9328,8 @@ type settingsResponse struct {
 	FirstTokenTimeoutSeconds           int                              `json:"first_token_timeout_seconds"`
 	BillingTierPolicy                  string                           `json:"billing_tier_policy"`
 	ModelsListReadMaxBytes             int64                            `json:"models_list_read_max_bytes"`
+	CodexPriorityServiceTierEnabled    bool                             `json:"codex_priority_service_tier_enabled"`
+	CodexPriorityMinRemainingRatio     float64                          `json:"codex_priority_service_tier_min_remaining_ratio"`
 	ShowFullUsageNumbers               bool                             `json:"show_full_usage_numbers"`
 	PublicKeyUsagePageEnabled          bool                             `json:"public_key_usage_page_enabled"`
 	PublicImageStudioPageEnabled       bool                             `json:"public_image_studio_page_enabled"`
@@ -9498,6 +9500,8 @@ type updateSettingsReq struct {
 	FirstTokenTimeoutSeconds            *int                             `json:"first_token_timeout_seconds"`
 	BillingTierPolicy                   *string                          `json:"billing_tier_policy"`
 	ModelsListReadMaxBytes              *int64                           `json:"models_list_read_max_bytes"`
+	CodexPriorityServiceTierEnabled     *bool                            `json:"codex_priority_service_tier_enabled"`
+	CodexPriorityMinRemainingRatio      *float64                         `json:"codex_priority_service_tier_min_remaining_ratio"`
 	ShowFullUsageNumbers                *bool                            `json:"show_full_usage_numbers"`
 	PublicKeyUsagePageEnabled           *bool                            `json:"public_key_usage_page_enabled"`
 	PublicImageStudioPageEnabled        *bool                            `json:"public_image_studio_page_enabled"`
@@ -10165,6 +10169,8 @@ func (h *Handler) GetSettings(c *gin.Context) {
 	autoResetCreditsOnExhaustionEnabled := runtimeCfg.AutoResetCreditsOnExhaustionEnabled
 	autoResetCreditsBeforeExpiryMin := runtimeCfg.AutoResetCreditsBeforeExpiryMin
 	autoActivate5hWindowEnabled := runtimeCfg.AutoActivate5hWindowEnabled
+	codexPriorityServiceTierEnabled := runtimeCfg.CodexPriorityServiceTierEnabled
+	codexPriorityMinRemainingRatio := runtimeCfg.CodexPriorityMinRemainingRatio
 	// uTLS 优雅关闭等待上限（issue #446）：与自动消费同款，数据库是多实例下的权威来源。
 	utlsShutdownTimeoutMinutes := runtimeCfg.UTLSShutdownTimeoutMin
 	if dbSettings != nil {
@@ -10172,6 +10178,8 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		autoResetCreditsOnExhaustionEnabled = dbSettings.AutoResetCreditsOnExhaustionEnabled
 		autoResetCreditsBeforeExpiryMin = dbSettings.AutoResetCreditsBeforeExpiryMin
 		autoActivate5hWindowEnabled = dbSettings.AutoActivate5hWindowEnabled
+		codexPriorityServiceTierEnabled = dbSettings.CodexPriorityServiceTierEnabled
+		codexPriorityMinRemainingRatio = database.NormalizeCodexPriorityMinRemainingRatio(dbSettings.CodexPriorityMinRemainingRatio)
 		utlsShutdownTimeoutMinutes = database.NormalizeUTLSShutdownTimeoutMinutes(dbSettings.UTLSShutdownTimeoutMinutes)
 	}
 	imgCfg := imagestore.CurrentConfig()
@@ -10341,6 +10349,8 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		FirstTokenTimeoutSeconds:            runtimeCfg.FirstTokenTimeoutSec,
 		BillingTierPolicy:                   runtimeCfg.BillingTierPolicy,
 		ModelsListReadMaxBytes:              runtimeCfg.ModelsListReadMaxBytes,
+		CodexPriorityServiceTierEnabled:     codexPriorityServiceTierEnabled,
+		CodexPriorityMinRemainingRatio:      codexPriorityMinRemainingRatio,
 		ShowFullUsageNumbers:                showFullUsageNumbers,
 		PublicKeyUsagePageEnabled:           publicKeyUsagePageEnabled,
 		PublicImageStudioPageEnabled:        publicImageStudioPageEnabled,
@@ -10592,6 +10602,12 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 			return
 		}
 	}
+	if req.CodexPriorityMinRemainingRatio != nil {
+		if err := validateAutoPauseThreshold("codex_priority_service_tier_min_remaining_ratio", *req.CodexPriorityMinRemainingRatio); err != nil {
+			writeError(c, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 
 	responseCacheUpdate := database.ResponseCacheSettingsUpdate{
 		LocalMaxBytes:       req.ResponseCacheLocalMaxBytes,
@@ -10646,6 +10662,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	persistedAutoResetCreditsBeforeExpiryMin := 60
 	persistedAutoActivate5hWindowEnabled := false
 	codexImagesMainModel := ""
+	persistedCodexPriorityServiceTierEnabled := false
+	persistedCodexPriorityMinRemainingRatio := database.DefaultCodexPriorityMinRemainingRatio
 	persistedUTLSShutdownTimeoutMinutes := database.NormalizeUTLSShutdownTimeoutMinutes(0)
 	modelsListReadMaxBytes := database.DefaultModelsListReadMaxBytes
 	sessionSlotBufferEnabled := h.store.SessionSlotBufferEnabled()
@@ -10671,6 +10689,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		persistedAutoResetCreditsBeforeExpiryMin = existingSettings.AutoResetCreditsBeforeExpiryMin
 		persistedAutoActivate5hWindowEnabled = existingSettings.AutoActivate5hWindowEnabled
 		codexImagesMainModel = existingSettings.CodexImagesMainModel
+		persistedCodexPriorityServiceTierEnabled = existingSettings.CodexPriorityServiceTierEnabled
+		persistedCodexPriorityMinRemainingRatio = database.NormalizeCodexPriorityMinRemainingRatio(existingSettings.CodexPriorityMinRemainingRatio)
 		persistedUTLSShutdownTimeoutMinutes = database.NormalizeUTLSShutdownTimeoutMinutes(existingSettings.UTLSShutdownTimeoutMinutes)
 		modelsListReadMaxBytes = database.NormalizeModelsListReadMaxBytes(existingSettings.ModelsListReadMaxBytes)
 		sessionSlotBufferEnabled = existingSettings.SessionSlotBufferEnabled
@@ -10745,12 +10765,16 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	previousAutoResetCreditsOnExhaustionEnabled := runtimeCfg.AutoResetCreditsOnExhaustionEnabled
 	previousAutoResetCreditsBeforeExpiryMin := runtimeCfg.AutoResetCreditsBeforeExpiryMin
 	previousAutoActivate5hWindowEnabled := runtimeCfg.AutoActivate5hWindowEnabled
+	previousCodexPriorityServiceTierEnabled := runtimeCfg.CodexPriorityServiceTierEnabled
+	previousCodexPriorityMinRemainingRatio := runtimeCfg.CodexPriorityMinRemainingRatio
 	// 数据库是多实例下的权威来源；用持久值作为本次 partial update 的基线，
-	// 避免旧实例保存无关字段时把自动消费配置回滚成自己的陈旧快照。
+	// 避免旧实例保存无关字段时把自动消费或自动 Fast 配置回滚成自己的陈旧快照。
 	runtimeCfg.AutoResetCreditsEnabled = persistedAutoResetCreditsEnabled
 	runtimeCfg.AutoResetCreditsOnExhaustionEnabled = persistedAutoResetCreditsOnExhaustionEnabled
 	runtimeCfg.AutoResetCreditsBeforeExpiryMin = persistedAutoResetCreditsBeforeExpiryMin
 	runtimeCfg.AutoActivate5hWindowEnabled = persistedAutoActivate5hWindowEnabled
+	runtimeCfg.CodexPriorityServiceTierEnabled = persistedCodexPriorityServiceTierEnabled
+	runtimeCfg.CodexPriorityMinRemainingRatio = persistedCodexPriorityMinRemainingRatio
 	runtimeCfg.UTLSShutdownTimeoutMin = persistedUTLSShutdownTimeoutMinutes
 	runtimeCfg.ModelsListReadMaxBytes = modelsListReadMaxBytes
 	continuousRetryPolicy := h.store.GetContinuousRetryPolicy()
@@ -10768,6 +10792,10 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		(req.AutoResetCreditsEnabled != nil && *req.AutoResetCreditsEnabled != persistedAutoResetCreditsEnabled) ||
 		(req.AutoResetCreditsBeforeExpiryMin != nil && *req.AutoResetCreditsBeforeExpiryMin != persistedAutoResetCreditsBeforeExpiryMin)
 	autoActivate5hChanged := req.AutoActivate5hWindowEnabled != nil && *req.AutoActivate5hWindowEnabled != persistedAutoActivate5hWindowEnabled
+	codexPriorityServiceTierChanged := (req.CodexPriorityServiceTierEnabled != nil &&
+		*req.CodexPriorityServiceTierEnabled != persistedCodexPriorityServiceTierEnabled) ||
+		(req.CodexPriorityMinRemainingRatio != nil &&
+			*req.CodexPriorityMinRemainingRatio != persistedCodexPriorityMinRemainingRatio)
 	usageLogMode := h.db.GetUsageLogMode()
 	usageLogBatchSize := h.db.GetUsageLogBatchSize()
 	usageLogFlushIntervalSeconds := h.db.GetUsageLogFlushIntervalSeconds()
@@ -11431,6 +11459,14 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		runtimeCfg.BillingTierPolicy = proxy.NormalizeBillingTierPolicy(*req.BillingTierPolicy)
 		log.Printf("设置已更新: billing_tier_policy = %s", runtimeCfg.BillingTierPolicy)
 	}
+	if req.CodexPriorityServiceTierEnabled != nil {
+		runtimeCfg.CodexPriorityServiceTierEnabled = *req.CodexPriorityServiceTierEnabled
+		log.Printf("设置已更新: codex_priority_service_tier_enabled = %t", runtimeCfg.CodexPriorityServiceTierEnabled)
+	}
+	if req.CodexPriorityMinRemainingRatio != nil {
+		runtimeCfg.CodexPriorityMinRemainingRatio = *req.CodexPriorityMinRemainingRatio
+		log.Printf("设置已更新: codex_priority_service_tier_min_remaining_ratio = %.4f", runtimeCfg.CodexPriorityMinRemainingRatio)
+	}
 	if req.ShowFullUsageNumbers != nil {
 		showFullUsageNumbers = *req.ShowFullUsageNumbers
 		log.Printf("设置已更新: show_full_usage_numbers = %t", showFullUsageNumbers)
@@ -11509,6 +11545,11 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	}
 	if autoActivate5hChanged {
 		effectiveRuntimeCfg.AutoActivate5hWindowEnabled = previousAutoActivate5hWindowEnabled
+	}
+	// 自动 Fast 也等数据库确认保存成功后再发布，避免运行态与持久值分裂。
+	if codexPriorityServiceTierChanged {
+		effectiveRuntimeCfg.CodexPriorityServiceTierEnabled = previousCodexPriorityServiceTierEnabled
+		effectiveRuntimeCfg.CodexPriorityMinRemainingRatio = previousCodexPriorityMinRemainingRatio
 	}
 	effectiveRuntimeCfg = proxy.UpdateRuntimeSettings(func(current proxy.RuntimeSettings) proxy.RuntimeSettings {
 		// CodexSyncedCLIVersion 由后台同步任务独立维护；管理员保存其他设置时
@@ -11848,6 +11889,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		FirstTokenMode:                      runtimeCfg.FirstTokenMode,
 		FirstTokenTimeoutSeconds:            runtimeCfg.FirstTokenTimeoutSec,
 		BillingTierPolicy:                   runtimeCfg.BillingTierPolicy,
+		CodexPriorityServiceTierEnabled:     runtimeCfg.CodexPriorityServiceTierEnabled,
+		CodexPriorityMinRemainingRatio:      runtimeCfg.CodexPriorityMinRemainingRatio,
 		ShowFullUsageNumbers:                showFullUsageNumbers,
 		PublicKeyUsagePageEnabled:           publicKeyUsagePageEnabled,
 		PublicImageStudioPageEnabled:        publicImageStudioPageEnabled,
@@ -11906,6 +11949,11 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 			writeError(c, http.StatusInternalServerError, "保存持续重试策略失败，设置未生效")
 			return
 		}
+		if codexPriorityServiceTierChanged {
+			runtimeCfg = effectiveRuntimeCfg
+			writeError(c, http.StatusInternalServerError, "保存高余额自动 Fast 设置失败，设置未生效")
+			return
+		}
 	} else {
 		if req.SessionSlotBufferSeconds != nil {
 			h.store.SetSessionSlotBuffer(time.Duration(sessionSlotBufferSeconds) * time.Second)
@@ -11962,7 +12010,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 			}
 			log.Printf("设置已更新: prompt_filter enabled=%t mode=%s threshold=%d", promptFilterCfg.Enabled, promptFilterCfg.Mode, promptFilterCfg.Threshold)
 		}
-		if autoResetCreditsChanged {
+		if autoResetCreditsChanged || codexPriorityServiceTierChanged {
 			runtimeCfg = proxy.UpdateRuntimeSettings(func(current proxy.RuntimeSettings) proxy.RuntimeSettings {
 				runtimeCfg.CodexSyncedCLIVersion = current.CodexSyncedCLIVersion
 				runtimeCfg.CodexSyncedDesktopMacBuild = current.CodexSyncedDesktopMacBuild
@@ -11970,6 +12018,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 				runtimeCfg.CodexSyncedVSCodeBuild = current.CodexSyncedVSCodeBuild
 				return runtimeCfg
 			})
+		}
+		if autoResetCreditsChanged {
 			h.triggerAutoResetCreditsScan()
 		}
 		if autoActivate5hChanged {
@@ -12211,6 +12261,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		FirstTokenTimeoutSeconds:            runtimeCfg.FirstTokenTimeoutSec,
 		BillingTierPolicy:                   runtimeCfg.BillingTierPolicy,
 		ModelsListReadMaxBytes:              runtimeCfg.ModelsListReadMaxBytes,
+		CodexPriorityServiceTierEnabled:     runtimeCfg.CodexPriorityServiceTierEnabled,
+		CodexPriorityMinRemainingRatio:      runtimeCfg.CodexPriorityMinRemainingRatio,
 		ShowFullUsageNumbers:                showFullUsageNumbers,
 		PublicKeyUsagePageEnabled:           publicKeyUsagePageEnabled,
 		PublicImageStudioPageEnabled:        publicImageStudioPageEnabled,

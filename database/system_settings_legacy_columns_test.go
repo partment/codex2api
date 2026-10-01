@@ -19,8 +19,8 @@ func TestSQLiteSystemSettingsIgnoresRetiredColumnsAfterRestart(t *testing.T) {
 		}
 	})
 
-	// New installations omit the retired route settings. Existing installations
-	// may retain these columns without needing a destructive schema migration.
+	// New installations omit retired settings. Existing installations may
+	// retain these columns without needing a destructive schema migration.
 	legacyColumns := []struct {
 		name string
 		ddl  string
@@ -31,6 +31,7 @@ func TestSQLiteSystemSettingsIgnoresRetiredColumnsAfterRestart(t *testing.T) {
 		{"codex_basispoints_403_probe_interval_minutes", "INTEGER DEFAULT 1"},
 		{"codex_basispoints_429_cooldown_seconds", "INTEGER DEFAULT 5"},
 		{"codex_basispoints_cache_creation_as_input", "INTEGER DEFAULT 0"},
+		{"auto_reset_credits_low_balance_enabled", "INTEGER DEFAULT 0"},
 	}
 	for _, column := range legacyColumns {
 		var count int
@@ -53,7 +54,8 @@ func TestSQLiteSystemSettingsIgnoresRetiredColumnsAfterRestart(t *testing.T) {
 		codex_basispoints_403_pause_disabled = 1,
 		codex_basispoints_403_probe_interval_minutes = 60,
 		codex_basispoints_429_cooldown_seconds = 90,
-		codex_basispoints_cache_creation_as_input = 1
+		codex_basispoints_cache_creation_as_input = 1,
+		auto_reset_credits_low_balance_enabled = 1
 		WHERE id = 1`); err != nil {
 		t.Fatalf("populate legacy settings: %v", err)
 	}
@@ -83,6 +85,13 @@ func TestSQLiteSystemSettingsIgnoresRetiredColumnsAfterRestart(t *testing.T) {
 	settings, err = db.GetSystemSettings(ctx)
 	if err != nil || settings == nil || settings.SiteName != "After upgrade" || settings.MaxConcurrency != 8 {
 		t.Fatalf("read saved settings after restart = %+v, %v", settings, err)
+	}
+	var legacyLowBalance int
+	if err := db.conn.QueryRowContext(ctx, `SELECT auto_reset_credits_low_balance_enabled FROM system_settings WHERE id = 1`).Scan(&legacyLowBalance); err != nil {
+		t.Fatal(err)
+	}
+	if legacyLowBalance != 1 || settings.AutoResetCreditsOnExhaustionEnabled || settings.AutoResetCreditsEnabled {
+		t.Fatalf("retired low-balance flag must be preserved but not activate resets: legacy=%d settings=%+v", legacyLowBalance, settings)
 	}
 	var enabled, pauseDisabled, probeMinutes, cooldownSeconds, cacheAsInput int
 	var models string

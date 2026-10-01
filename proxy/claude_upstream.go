@@ -1196,15 +1196,12 @@ func SyncClaudeUsageState(store *auth.Store, account *auth.Account, resp *http.R
 			if ok5h {
 				account.SetUsageSnapshot5hAt(pct5h, reset5h, observedAt)
 			}
-			if ok7d && !reset7d.IsZero() {
-				account.SetReset7dAt(reset7d)
-			}
-			if store == nil {
-				return
-			}
 			if ok7d {
-				store.PersistUsageSnapshot(account, pct7d)
-			} else if ok5h {
+				store.PersistUsageSnapshot7d(account, auth.UsageSnapshot7d{
+					Percent: pct7d, Valid: true, ResetAt: reset7d,
+					WindowSeconds: 7 * 24 * 60 * 60, UpdatedAt: observedAt,
+				})
+			} else if ok5h && store != nil {
 				store.PersistUsageSnapshot5hOnly(account)
 			}
 		})
@@ -1237,12 +1234,12 @@ func SyncClaudeUsageState(store *auth.Store, account *auth.Account, resp *http.R
 				if r7.IsZero() {
 					r7 = claudeRatelimitHeaderTime(h.Get("anthropic-ratelimit-unified-reset"))
 				}
-				account.ApplyUsageObservation(time.Now(), func() {
-					account.SetUsageSnapshot(100, time.Now())
-					if !r7.IsZero() {
-						account.SetReset7dAt(r7)
-					}
-					store.PersistUsageSnapshot(account, 100)
+				observedAt := time.Now()
+				account.ApplyUsageObservation(observedAt, func() {
+					store.PersistUsageSnapshot7d(account, auth.UsageSnapshot7d{
+						Percent: 100, Valid: true, ResetAt: r7,
+						WindowSeconds: 7 * 24 * 60 * 60, UpdatedAt: observedAt,
+					})
 				})
 			}
 			store.MarkUsage7dRateLimited(account)

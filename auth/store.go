@@ -154,6 +154,15 @@ func NormalizeTestContent(content string) string {
 	return content
 }
 
+// UsageSnapshot7d keeps one authoritative long-window observation together.
+type UsageSnapshot7d struct {
+	Percent       float64
+	Valid         bool
+	ResetAt       time.Time
+	WindowSeconds int64
+	UpdatedAt     time.Time
+}
+
 // Account 运行时账号状态
 type Account struct {
 	daybreak                  database.DaybreakSnapshot
@@ -2309,6 +2318,38 @@ func (a *Account) GetUsagePercent7d() (float64, bool) {
 	return a.UsagePercent7d, a.UsagePercent7dValid
 }
 
+// SetUsageSnapshot7d atomically replaces a complete observation. Unknown reset
+// times clear old values; a non-positive window length preserves the known one.
+func (a *Account) SetUsageSnapshot7d(snapshot UsageSnapshot7d) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.UsagePercent7d = snapshot.Percent
+	a.UsagePercent7dValid = snapshot.Valid
+	a.Reset7dAt = snapshot.ResetAt
+	if snapshot.WindowSeconds > 0 {
+		a.Window7dSeconds = snapshot.WindowSeconds
+	}
+	a.UsageUpdatedAt = snapshot.UpdatedAt
+	if snapshot.UpdatedAt.After(a.usageObservedAt) {
+		a.usageObservedAt = snapshot.UpdatedAt
+	}
+}
+
+func (a *Account) GetUsageSnapshot7d() UsageSnapshot7d {
+	if a == nil {
+		return UsageSnapshot7d{}
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return UsageSnapshot7d{
+		Percent: a.UsagePercent7d, Valid: a.UsagePercent7dValid,
+		ResetAt: a.Reset7dAt, WindowSeconds: a.Window7dSeconds, UpdatedAt: a.UsageUpdatedAt,
+	}
+}
+
 // MarkUsage7dRateLimited marks an account as rate-limited when its active 7d
 // usage window is exhausted. A future reset time is preferred; missing reset
 // metadata falls back to a full 7d cooldown, while stale reset times are ignored.
@@ -2320,14 +2361,14 @@ func (s *Store) MarkUsage7dRateLimited(acc *Account) bool {
 		return false
 	}
 
-	pct, ok := acc.GetUsagePercent7d()
-	if !ok || pct < 100 {
+	snapshot := acc.GetUsageSnapshot7d()
+	if !snapshot.Valid || snapshot.Percent < 100 {
 		return false
 	}
 
 	duration := 7 * 24 * time.Hour
-	if resetAt := acc.GetReset7dAt(); !resetAt.IsZero() {
-		untilReset := time.Until(resetAt)
+	if !snapshot.ResetAt.IsZero() {
+		untilReset := time.Until(snapshot.ResetAt)
 		if untilReset <= 0 {
 			return false
 		}
@@ -5792,13 +5833,15 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 					log.Printf("[账号 %d] 解析 codex_usage_updated_at 失败: %v", row.ID, err)
 				}
 			}
-			account.SetUsageSnapshot(parsed, updatedAt)
-			// 恢复 7d 重置时间
-			if resetAt := row.GetCredential("codex_7d_reset_at"); resetAt != "" {
-				if t, err := time.Parse(time.RFC3339, resetAt); err == nil {
-					account.SetReset7dAt(t)
-				}
+			resetAt := time.Time{}
+			if raw := row.GetCredential("codex_7d_reset_at"); raw != "" {
+				resetAt, _ = time.Parse(time.RFC3339, raw)
 			}
+			windowSeconds, _ := row.GetCredentialInt64("codex_7d_window_seconds")
+			account.SetUsageSnapshot7d(UsageSnapshot7d{
+				Percent: parsed, Valid: true, ResetAt: resetAt,
+				WindowSeconds: windowSeconds, UpdatedAt: updatedAt,
+			})
 		} else {
 			log.Printf("[账号 %d] 解析 codex_7d_used_percent 失败: %v", row.ID, err)
 		}
@@ -10716,6 +10759,59 @@ func (s *Store) ReportRequestFailure(acc *Account, kind string, latency time.Dur
 	acc.recomputeSchedulerLocked(atomic.LoadInt64(&s.maxConcurrency))
 	acc.mu.Unlock()
 	s.fastSchedulerUpdate(acc)
+}
+
+// PersistUsageSnapshot7d publishes and persists a complete observation. Callers
+// serialize authoritative probes with ApplyUsageObservation. The legacy
+// percentage-only API below keeps its non-destructive reset metadata behavior.
+func (s *Store) PersistUsageSnapshot7d(acc *Account, snapshot UsageSnapshot7d) {
+	if acc == nil {
+		return
+	}
+	acc.SetUsageSnapshot7d(snapshot)
+	if s == nil {
+		return
+	}
+	s.fastSchedulerUpdate(acc)
+	if s.db == nil {
+		return
+	}
+
+	snapshot = acc.GetUsageSnapshot7d()
+	fields := map[string]interface{}{
+		"codex_7d_used_percent":   nil,
+		"codex_7d_reset_at":       nil,
+		"codex_7d_window_seconds": snapshot.WindowSeconds,
+		"codex_usage_updated_at":  nil,
+	}
+	if snapshot.Valid {
+		fields["codex_7d_used_percent"] = snapshot.Percent
+	}
+	if !snapshot.ResetAt.IsZero() {
+		fields["codex_7d_reset_at"] = snapshot.ResetAt.Format(time.RFC3339)
+	}
+	if !snapshot.UpdatedAt.IsZero() {
+		fields["codex_usage_updated_at"] = snapshot.UpdatedAt.Format(time.RFC3339)
+	}
+	acc.mu.RLock()
+	if acc.UsagePercent5hValid {
+		fields["codex_5h_used_percent"] = acc.UsagePercent5h
+		fields["codex_5h_reset_at"] = nil
+		fields["codex_5h_usage_updated_at"] = nil
+		if !acc.Reset5hAt.IsZero() {
+			fields["codex_5h_reset_at"] = acc.Reset5hAt.Format(time.RFC3339)
+		}
+		if !acc.UsageUpdatedAt5h.IsZero() {
+			fields["codex_5h_usage_updated_at"] = acc.UsageUpdatedAt5h.Format(time.RFC3339)
+		}
+	}
+	acc.mu.RUnlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := s.db.UpdateCredentials(ctx, acc.DBID, fields); err != nil {
+		log.Printf("[账号 %d] 持久化用量快照失败: %v", acc.DBID, err)
+	}
 }
 
 // PersistUsageSnapshot 持久化账号用量快照（7d + 5h）

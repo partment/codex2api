@@ -1699,6 +1699,108 @@ func TestSystemSettingsNormalizeBlankBillingTierPolicy(t *testing.T) {
 	}
 }
 
+func TestSQLiteSystemSettingsPersistsCodexPriorityServiceTier(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite): %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	settings := &SystemSettings{
+		CodexPriorityServiceTierEnabled: true,
+		CodexPriorityMinRemainingRatio:  0.8,
+	}
+	if err := db.UpdateSystemSettings(ctx, settings); err != nil {
+		t.Fatalf("UpdateSystemSettings: %v", err)
+	}
+	got, err := db.GetSystemSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetSystemSettings: %v", err)
+	}
+	if got == nil || !got.CodexPriorityServiceTierEnabled {
+		t.Fatalf("CodexPriorityServiceTierEnabled = %#v, want true", got)
+	}
+	if got.CodexPriorityMinRemainingRatio != 0.8 {
+		t.Fatalf("CodexPriorityMinRemainingRatio = %v, want 0.8", got.CodexPriorityMinRemainingRatio)
+	}
+
+	settings.CodexPriorityMinRemainingRatio = 0
+	if err := db.UpdateSystemSettings(ctx, settings); err != nil {
+		t.Fatalf("UpdateSystemSettings(zero ratio): %v", err)
+	}
+	got, err = db.GetSystemSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetSystemSettings(zero ratio): %v", err)
+	}
+	if got.CodexPriorityMinRemainingRatio != 0 {
+		t.Fatalf("zero ratio = %v, want 0", got.CodexPriorityMinRemainingRatio)
+	}
+}
+
+func TestSQLiteSystemSettingsDefaultsCodexPriorityServiceTierRatio(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite): %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	if _, err := db.conn.ExecContext(ctx, `INSERT INTO system_settings (id) VALUES (1)`); err != nil {
+		t.Fatalf("insert defaults: %v", err)
+	}
+	got, err := db.GetSystemSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetSystemSettings: %v", err)
+	}
+	if got == nil || got.CodexPriorityMinRemainingRatio != 0.5 {
+		t.Fatalf("default auto Fast ratio = %#v, want 0.5", got)
+	}
+}
+
+func TestSQLiteMigratesCodexPriorityServiceTierRatio(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "legacy.db")
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite): %v", err)
+	}
+	if _, err := db.conn.Exec(`INSERT INTO system_settings (id, codex_priority_service_tier_enabled) VALUES (1, 1)`); err != nil {
+		db.Close()
+		t.Fatalf("insert settings: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close sqlite: %v", err)
+	}
+
+	legacy, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open legacy sqlite: %v", err)
+	}
+	if _, err := legacy.Exec(`ALTER TABLE system_settings DROP COLUMN codex_priority_service_tier_min_remaining_ratio`); err != nil {
+		legacy.Close()
+		t.Fatalf("remove new settings column: %v", err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatalf("close legacy sqlite: %v", err)
+	}
+
+	db, err = New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) migrate legacy database: %v", err)
+	}
+	defer db.Close()
+
+	got, err := db.GetSystemSettings(context.Background())
+	if err != nil {
+		t.Fatalf("GetSystemSettings after migration: %v", err)
+	}
+	if got == nil || !got.CodexPriorityServiceTierEnabled || got.CodexPriorityMinRemainingRatio != 0.5 {
+		t.Fatalf("migrated auto Fast settings = %#v, want enabled ratio 0.5", got)
+	}
+}
+
 func TestSQLitePartialBackgroundSettingsUpdatesPreserveAutoResetCredits(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
 	db, err := New("sqlite", dbPath)

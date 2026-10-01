@@ -4150,6 +4150,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		}
 		attemptEffectiveModel := effectiveModel
 		attemptLogEffectiveModel := logEffectiveModel
+		serviceTier := extractServiceTier(codexBody)
 		// relay/Grok 账号默认走 HTTP，这里排除全局强制 WS，避免日志把它们错标成 via_websocket。
 		// 打开了上游 WebSocket 的 OpenAI Responses 中转账号在体积判断之后单独改回 WS。
 		useWebsocket := h.shouldUseWebsocketForHTTP() && !wsHTTPFallback.ForceHTTP() && !account.IsRelayStyle()
@@ -4985,6 +4986,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		if useWebsocket {
 			upstreamBody = stripResponsesImageGenerationTool(codexBody)
 		}
+		upstreamBody = applyQuotaPriorityServiceTier(account, upstreamBody, h.store.GetUsageProbeMaxAge())
 		// service_tier 记账按 payload 规则改写后的值归因（覆写 service_tier 的规则才生效）。
 		// 按尝试重算：不同尝试的生效模型/账号可能不同，规则按模型或账号门匹配则结果随之变化。
 		serviceTier = EffectiveRequestedServiceTier(upstreamBody, attemptEffectiveModel, downstreamHeaders, attemptIdentity)
@@ -6096,6 +6098,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		}
 		attemptEffectiveModel := effectiveModel
 		attemptLogEffectiveModel := logEffectiveModel
+		serviceTier := extractServiceTier(codexBody)
 
 		apiKey := strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer ")
 		apiKey = strings.TrimSpace(apiKey)
@@ -6351,14 +6354,25 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		// compact（会话压缩续写）刻意保留确定性 IsolateCodexSessionID、不走 resolveUpstreamSessionID
 		// 的默认隔离：压缩本身是对同一会话的延续，需要稳定的 prompt_cache_key 维持缓存连续性。
 		upstreamSessionID := IsolateCodexSessionID(apiKeyID, sessionIdentity.upstreamSeed)
+		upstreamBody := applyQuotaPriorityServiceTier(account, codexBody, h.store.GetUsageProbeMaxAge())
+		// compact 仍不套用一般 Payload Rules 與身份門，但 service_tier 覆寫必須優先於
+		// 自動 Fast；只同步規則算出的 tier，避免意外改寫壓縮請求的其他欄位。
+		serviceTier = EffectiveRequestedServiceTier(upstreamBody, attemptEffectiveModel, downstreamHeaders, nil)
+		if serviceTier == "" {
+			upstreamBody, _ = sjson.DeleteBytes(upstreamBody, "service_tier")
+		} else {
+			upstreamBody, _ = sjson.SetBytes(upstreamBody, "service_tier", serviceTier)
+		}
+		upstreamBody = sanitizeServiceTierForUpstream(upstreamBody)
+
 		// compact_via_responses_enabled：上游已下线 /responses/compact 专用端点（404），
 		// 开启后官方账号改走 /responses + compaction_trigger 的 body-signal 形态，
 		// 成功后聚合回 compact 的一次性 JSON。强制 WS 开启时优先走 WS；已知请求
 		// 过大或收到 close 1009 时，与普通 Responses 路径一致降级到 HTTP SSE。
 		compactViaResponses := CurrentRuntimeSettings().CompactViaResponses
-		compactRequestBody := codexBody
+		compactRequestBody := upstreamBody
 		if compactViaResponses {
-			compactRequestBody = appendCompactionTriggerToResponsesBody(codexBody)
+			compactRequestBody = appendCompactionTriggerToResponsesBody(upstreamBody)
 		}
 		useWebsocket := compactViaResponses && h.shouldUseWebsocketForHTTP() && !wsHTTPFallback.ForceHTTP() && !account.IsCodexAgentIdentity()
 		if useWebsocket && globalWSSizeRouter.PreferHTTP(len(compactRequestBody)) {
@@ -6378,7 +6392,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 			})
 		} else {
 			resp, reqErr = executeHTTPWithContinuousRetryKeepalive(c.Request.Context(), func() (*http.Response, error) {
-				return ExecuteCompactRequest(c.Request.Context(), account, codexBody, upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders)
+				return ExecuteCompactRequest(c.Request.Context(), account, upstreamBody, upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders)
 			})
 		}
 		durationMs := int(time.Since(start).Milliseconds())
@@ -6963,6 +6977,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		isRelayAccount := account.IsRelayStyle()
 		attemptEffectiveModel := effectiveModel
 		attemptLogEffectiveModel := logEffectiveModel
+		serviceTier := extractServiceTier(codexBody)
 		useWebsocket := h.shouldUseWebsocketForHTTP() && !wsHTTPFallback.ForceHTTP() && !isRelayAccount
 		// 真实生图意图强制走 HTTP：WebSocket 传输大体积图片数据会卡死（issue #220）。
 		// 仅凭注入的 image_generation 工具不触发降级，普通请求继续走 WS（issue #304）。
@@ -7004,13 +7019,6 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 
 		// 身份按 attempt 附加实际选中账号维度：account_* 门随重试换号重新匹配（issue #410）。
 		attemptIdentity := ruleIdentity.WithSelectedAccount(account, h.store)
-		// service_tier 记账按 payload 规则改写后的值归因（覆写 service_tier 的规则才生效）。
-		// 仅 Codex 路径（ExecuteRequest）套用规则；relay 账号不套用，保持原值。
-		// 按尝试重算：不同尝试的生效模型/账号可能不同，规则按模型或账号门匹配则结果随之变化。
-		if !isRelayAccount {
-			serviceTier = EffectiveRequestedServiceTier(codexBody, attemptEffectiveModel, downstreamHeaders, attemptIdentity)
-		}
-
 		upstreamSessionID := resolveUpstreamSessionID(apiKeyID, sessionIdentity.upstreamSeed, sessionIdentity.explicitUpstreamID, useWebsocket)
 		// 上游使用与客户端解耦的 context：客户端中途断开时仍能继续读完
 		// response.completed 拿到 usage（流式计费的关键）。
@@ -7054,6 +7062,9 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			}
 			upstreamCtx = WithCodexTurnStateAffinityKey(upstreamCtx, affinityKey)
 			guardCodexTurnStateEcho(affinityKey, account, downstreamHeaders)
+			upstreamBody = applyQuotaPriorityServiceTier(account, upstreamBody, h.store.GetUsageProbeMaxAge())
+			// 按尝试重算：不同尝试的账号可能命中不同 payload 规则。
+			serviceTier = EffectiveRequestedServiceTier(upstreamBody, attemptEffectiveModel, downstreamHeaders, attemptIdentity)
 			resp, reqErr = executeHTTPWithContinuousRetryKeepalive(upstreamCtx, func() (*http.Response, error) {
 				return ExecuteRequest(upstreamCtx, account, upstreamBody, upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders, useWebsocket)
 			})
@@ -8664,7 +8675,7 @@ func SyncCodexUsageState(store *auth.Store, account *auth.Account, resp *http.Re
 				return
 			}
 			if result.HasUsage7d {
-				store.PersistUsageSnapshot(account, result.UsagePct7d)
+				store.PersistUsageSnapshot7d(account, account.GetUsageSnapshot7d())
 				if result.UsagePct7d >= 100 {
 					result.Usage7dRateLimited = store.MarkUsage7dRateLimited(account)
 				}
@@ -8790,9 +8801,10 @@ func applyCodexUsageHeaderObservation(store *auth.Store, account *auth.Account, 
 
 	if observation.w7d.valid {
 		resetAt := observedAt.Add(time.Duration(observation.w7d.resetSec) * time.Second)
-		account.SetReset7dAt(resetAt)
-		account.SetWindow7dSeconds(int64(observation.w7d.windowMin * 60))
-		account.SetUsagePercent7d(observation.w7d.usedPct)
+		account.SetUsageSnapshot7d(auth.UsageSnapshot7d{
+			Percent: observation.w7d.usedPct, Valid: true, ResetAt: resetAt,
+			WindowSeconds: int64(observation.w7d.windowMin * 60), UpdatedAt: observedAt,
+		})
 		out.usagePct7d = observation.w7d.usedPct
 		out.hasUsage7d = true
 	}
