@@ -326,8 +326,9 @@ func (e *Executor) prepareWebsocketBody(body []byte, sessionID string) []byte {
 		wsBody, _ = sjson.SetBytes(wsBody, "instructions", "")
 	}
 
-	// 2. 清理多余字段（prompt_cache_retention 上游不接受，会返回 400 Unsupported parameter，必须删除）
+	// 2. Filter unsupported Codex cache controls without touching nested schemas.
 	wsBody = jsonbody.DeletePath(wsBody, "prompt_cache_retention")
+	wsBody = jsonbody.DeletePath(wsBody, "prompt_cache_options")
 	wsBody = jsonbody.DeletePath(wsBody, "safety_identifier")
 	wsBody = jsonbody.DeletePath(wsBody, "disable_response_storage")
 	// Downstream named lanes are multiplexed locally onto independent leases.
