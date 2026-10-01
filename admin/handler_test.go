@@ -2251,6 +2251,53 @@ func TestUpdateSettingsPersistsCodexPriorityServiceTierRatio(t *testing.T) {
 	}
 }
 
+func TestUpdateSettingsPersistsCodexTelemetry(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	previousRuntime := proxy.CurrentRuntimeSettings()
+	t.Cleanup(func() { proxy.ApplyRuntimeSettings(previousRuntime) })
+
+	db := newTestAdminDB(t)
+	tc := cache.NewMemory(4)
+	t.Cleanup(func() { _ = tc.Close() })
+	settings := defaultBootstrapSettings()
+	if err := db.UpdateSystemSettings(context.Background(), settings); err != nil {
+		t.Fatalf("seed settings: %v", err)
+	}
+	store := auth.NewStore(db, tc, settings)
+	t.Cleanup(store.Stop)
+	proxy.ApplyRuntimeSettingsFromSystem(settings)
+	handler := NewHandler(store, db, tc, proxy.NewRateLimiter(settings.GlobalRPM), "admin-secret")
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPut, "/api/admin/settings", strings.NewReader(`{"codex_telemetry_enabled":true,"codex_telemetry_timing_debug":true}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	handler.UpdateSettings(ctx)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	var response settingsResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if !response.CodexTelemetryEnabled || !response.CodexTelemetryTimingDebug {
+		t.Fatalf("settings response telemetry = enabled:%t timing:%t", response.CodexTelemetryEnabled, response.CodexTelemetryTimingDebug)
+	}
+	persisted, err := db.GetSystemSettings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted == nil || !persisted.CodexTelemetryEnabled || !persisted.CodexTelemetryTimingDebug {
+		t.Fatalf("persisted telemetry settings = %#v", persisted)
+	}
+	current := proxy.CurrentRuntimeSettings()
+	if !current.CodexTelemetryEnabled || !current.CodexTelemetryTimingDebug {
+		t.Fatalf("runtime telemetry = enabled:%t timing:%t", current.CodexTelemetryEnabled, current.CodexTelemetryTimingDebug)
+	}
+}
+
 func TestUpdateSettingsDoesNotEnableAutoResetCreditsWhenPersistenceFails(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -2332,6 +2379,8 @@ func TestAutoResetCreditsSettingsUseDatabaseAuthorityOnStaleInstance(t *testing.
 	settings.AutoResetCreditsBeforeExpiryMin = 60
 	settings.CodexPriorityServiceTierEnabled = false
 	settings.CodexPriorityMinRemainingRatio = 0.2
+	settings.CodexTelemetryEnabled = true
+	settings.CodexTelemetryTimingDebug = true
 	if err := db.UpdateSystemSettings(context.Background(), settings); err != nil {
 		t.Fatalf("seed settings: %v", err)
 	}
@@ -2344,6 +2393,8 @@ func TestAutoResetCreditsSettingsUseDatabaseAuthorityOnStaleInstance(t *testing.
 	staleRuntime.AutoResetCreditsBeforeExpiryMin = 90
 	staleRuntime.CodexPriorityServiceTierEnabled = true
 	staleRuntime.CodexPriorityMinRemainingRatio = 0.8
+	staleRuntime.CodexTelemetryEnabled = false
+	staleRuntime.CodexTelemetryTimingDebug = false
 	proxy.ApplyRuntimeSettings(staleRuntime)
 
 	getRecorder := httptest.NewRecorder()
@@ -2362,6 +2413,9 @@ func TestAutoResetCreditsSettingsUseDatabaseAuthorityOnStaleInstance(t *testing.
 	}
 	if response.CodexPriorityServiceTierEnabled || response.CodexPriorityMinRemainingRatio != 0.2 {
 		t.Fatalf("GET auto Fast settings=(%t,%v), want DB authority (false,0.2)", response.CodexPriorityServiceTierEnabled, response.CodexPriorityMinRemainingRatio)
+	}
+	if !response.CodexTelemetryEnabled || !response.CodexTelemetryTimingDebug {
+		t.Fatalf("GET telemetry settings must use database authority: enabled=%t timing=%t", response.CodexTelemetryEnabled, response.CodexTelemetryTimingDebug)
 	}
 
 	updateRecorder := httptest.NewRecorder()
@@ -2383,12 +2437,18 @@ func TestAutoResetCreditsSettingsUseDatabaseAuthorityOnStaleInstance(t *testing.
 	if persisted.CodexPriorityServiceTierEnabled || persisted.CodexPriorityMinRemainingRatio != 0.2 {
 		t.Fatalf("persisted auto Fast settings=(%t,%v), want (false,0.2)", persisted.CodexPriorityServiceTierEnabled, persisted.CodexPriorityMinRemainingRatio)
 	}
+	if !persisted.CodexTelemetryEnabled || !persisted.CodexTelemetryTimingDebug {
+		t.Fatalf("unrelated update overwrote persisted telemetry settings: %#v", persisted)
+	}
 	current := proxy.CurrentRuntimeSettings()
 	if current.AutoResetCreditsEnabled || current.AutoResetCreditsBeforeExpiryMin != 60 {
 		t.Fatalf("runtime auto settings=(%v,%d), want refreshed DB authority (false,60)", current.AutoResetCreditsEnabled, current.AutoResetCreditsBeforeExpiryMin)
 	}
 	if current.CodexPriorityServiceTierEnabled || current.CodexPriorityMinRemainingRatio != 0.2 {
 		t.Fatalf("runtime auto Fast settings=(%t,%v), want refreshed DB authority (false,0.2)", current.CodexPriorityServiceTierEnabled, current.CodexPriorityMinRemainingRatio)
+	}
+	if !current.CodexTelemetryEnabled || !current.CodexTelemetryTimingDebug {
+		t.Fatalf("runtime telemetry was not refreshed from database authority: enabled=%t timing=%t", current.CodexTelemetryEnabled, current.CodexTelemetryTimingDebug)
 	}
 	select {
 	case <-handler.autoResetCreditsWake:
