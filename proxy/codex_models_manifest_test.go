@@ -100,6 +100,112 @@ func TestListModelsOrManifestServesAntigravityAsCodexManifest(t *testing.T) {
 	}
 }
 
+func TestCapCodexOAuthManifestContext(t *testing.T) {
+	original := []byte(`{"models":[{"slug":"large","context_window":400000,"max_context_window":1000000,"max_output_tokens":500000,"future":{"keep":true}},{"slug":"small","context_window":200000,"max_context_window":372000},{"slug":"unknown","context_window":null},{"slug":"relay","context_window":500000}],"future":true}`)
+	capped, err := capCodexOAuthManifestContext(original, func(slug string) bool { return slug != "relay" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(capped), `"context_window":372000`) {
+		t.Fatalf("context was not capped: %s", capped)
+	}
+	var manifest struct {
+		Models []map[string]json.RawMessage `json:"models"`
+		Future bool                         `json:"future"`
+	}
+	if err := json.Unmarshal(capped, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if !manifest.Future || string(manifest.Models[0]["context_window"]) != "372000" || string(manifest.Models[0]["max_context_window"]) != "372000" || string(manifest.Models[0]["max_output_tokens"]) != "500000" || string(manifest.Models[0]["future"]) != `{"keep":true}` {
+		t.Fatalf("large model changed incorrectly: %s", capped)
+	}
+	if string(manifest.Models[1]["context_window"]) != "200000" || string(manifest.Models[1]["max_context_window"]) != "372000" || string(manifest.Models[2]["context_window"]) != "null" || string(manifest.Models[3]["context_window"]) != "500000" {
+		t.Fatalf("other models changed incorrectly: %s", capped)
+	}
+	if !strings.Contains(string(original), `"context_window":400000`) {
+		t.Fatal("original upstream manifest was mutated")
+	}
+	unchanged, err := capCodexOAuthManifestContext([]byte(`{"models":[{"slug":"small","context_window":100000}]}`), nil)
+	if err != nil || string(unchanged) != `{"models":[{"slug":"small","context_window":100000}]}` {
+		t.Fatalf("unchanged manifest = %s, %v", unchanged, err)
+	}
+}
+
+func TestCodexOAuthManifestCapsContextAndUsesLocalETag(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, tc := range []struct {
+		name       string
+		unified    bool
+		downstream http.Header
+	}{
+		{name: "legacy identity"},
+		{name: "configured identity", unified: true},
+		{name: "official client identity", unified: true, downstream: http.Header{
+			"User-Agent": {"codex-tui/0.160.0 (Mac OS 15.5.0; arm64) xterm-256color (codex-tui; 0.160.0)"},
+			"Originator": {"codex-tui"},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			applyMaintenanceIdentitySettings(t, func(s *RuntimeSettings) {
+				s.CodexUserAgentConfig = testDesktopUserAgentConfig
+				s.CodexUnifiedClientIdentityEnabled = tc.unified
+			})
+			account := &auth.Account{DBID: 1, AccessToken: "test-token", PlanType: "plus"}
+			wantVersion, wantOriginator := "0.140.0", Originator
+			wantUA := replaceCodexUserAgentVersion(defaultCodexCLIUserAgent, wantVersion)
+			if tc.unified {
+				identity := ResolveCodexMaintenanceIdentity(account, tc.downstream)
+				wantUA, wantOriginator, wantVersion = identity.UserAgent, identity.Originator, identity.Version
+			}
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if got := r.Header.Get("If-None-Match"); got != "" {
+					t.Errorf("forwarded local validator to upstream: %q", got)
+				}
+				if r.Header.Get("User-Agent") != wantUA || r.Header.Get("Originator") != wantOriginator || r.Header.Get("Version") != wantVersion || r.URL.Query().Get("client_version") != wantVersion {
+					t.Errorf("manifest identity headers=%v query=%v, want UA=%q Originator=%q Version=%q", r.Header, r.URL.Query(), wantUA, wantOriginator, wantVersion)
+				}
+				w.Header().Set("ETag", `"upstream"`)
+				_, _ = w.Write([]byte(`{"models":[{"slug":"gpt-5.5","context_window":500000,"max_context_window":500000}]}`))
+			}))
+			defer upstream.Close()
+			oldURL := codexModelsManifestURLForTest
+			codexModelsManifestURLForTest = upstream.URL
+			t.Cleanup(func() { codexModelsManifestURLForTest = oldURL })
+
+			store := auth.NewStore(nil, nil, nil)
+			t.Cleanup(store.Stop)
+			store.AddAccount(account)
+			handler := NewHandler(store, nil, nil, nil)
+			router := gin.New()
+			router.GET("/models", handler.CodexModelsManifestHandler)
+			request := func(etag string) *httptest.ResponseRecorder {
+				r := httptest.NewRecorder()
+				req := httptest.NewRequest(http.MethodGet, "/models?client_version=0.140.0", nil)
+				for name, values := range tc.downstream {
+					req.Header[name] = values
+				}
+				if etag != "" {
+					req.Header.Set("If-None-Match", etag)
+				}
+				router.ServeHTTP(r, req)
+				return r
+			}
+			first := request("")
+			if first.Code != http.StatusOK || !strings.Contains(first.Body.String(), `"context_window":372000`) || !strings.Contains(first.Body.String(), `"max_context_window":372000`) {
+				t.Fatalf("response = %d %s", first.Code, first.Body.String())
+			}
+			etag := first.Header().Get("ETag")
+			if etag == "" || etag == `"upstream"` {
+				t.Fatalf("ETag = %q", etag)
+			}
+			second := request(etag)
+			if second.Code != http.StatusNotModified || second.Body.Len() != 0 {
+				t.Fatalf("cached response = %d %s", second.Code, second.Body.String())
+			}
+		})
+	}
+}
+
 func TestMergeCodexManifestModelsAppendsMissingRelaySlugs(t *testing.T) {
 	merged, err := mergeCodexManifestModels(
 		[]byte(`{"models":[{"slug":"gpt-5.4","display_name":"GPT"}],"future":true}`),
