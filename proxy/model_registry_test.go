@@ -25,6 +25,27 @@ func newTestModelRegistryDB(t *testing.T) *database.DB {
 	return db
 }
 
+func TestBuiltinModelCatalogIncludesDaybreakAlias(t *testing.T) {
+	catalog, err := ListModelCatalog(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("ListModelCatalog error: %v", err)
+	}
+	if !slices.Contains(catalog.Models, "gpt-daybreak-blue-latest") {
+		t.Fatalf("builtin catalog missing gpt-daybreak-blue-latest: %v", catalog.Models)
+	}
+
+	for _, item := range catalog.Items {
+		if item.ID != "gpt-daybreak-blue-latest" {
+			continue
+		}
+		if !item.Enabled || item.Source != ModelSourceBuiltin || item.APIKeyAuthAvailable {
+			t.Fatalf("builtin daybreak metadata = %+v", item)
+		}
+		return
+	}
+	t.Fatal("builtin catalog items missing gpt-daybreak-blue-latest")
+}
+
 func TestParseOfficialCodexModelIDs(t *testing.T) {
 	html := `
 		<astro-island props="{&quot;name&quot;:[0,&quot;gpt-5.5&quot;]}"></astro-island>
@@ -438,9 +459,9 @@ func TestParseOfficialCodexModelIDsIgnoresNonModelContexts(t *testing.T) {
 	}
 }
 
-// issue #624：Trusted Access for Cyber 账号的清单里带 gpt-daybreak-blue-latest，
-// 学习后必须立刻进入请求侧支持列表，否则 /v1/models 不列、/responses 直接拒绝。
-func TestLearnModelsFromManifest_AdmitsNonVersionedCyberAlias(t *testing.T) {
+// issue #624：Trusted Access for Cyber 账号的清单里带 gpt-daybreak-blue-latest；
+// 它现在是内置模型，manifest 不应重复写入注册表，但请求侧仍必须支持。
+func TestLearnModelsFromManifest_SkipsBuiltinNonVersionedCyberAlias(t *testing.T) {
 	db := newTestModelRegistryDB(t)
 	ctx := context.Background()
 	manifest := []byte(`{"models":[
@@ -452,8 +473,8 @@ func TestLearnModelsFromManifest_AdmitsNonVersionedCyberAlias(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LearnModelsFromManifest error: %v", err)
 	}
-	if !slices.Equal(added, []string{"gpt-daybreak-blue-latest"}) {
-		t.Fatalf("added = %v, want [gpt-daybreak-blue-latest] (retired 5.2 must still be rejected)", added)
+	if len(added) != 0 {
+		t.Fatalf("added = %v, want no new row for builtin daybreak alias", added)
 	}
 	catalog, err := ListModelCatalog(ctx, db)
 	if err != nil {
@@ -462,15 +483,20 @@ func TestLearnModelsFromManifest_AdmitsNonVersionedCyberAlias(t *testing.T) {
 	if !slices.Contains(catalog.Models, "gpt-daybreak-blue-latest") {
 		t.Fatalf("learned alias missing from catalog: %v", catalog.Models)
 	}
+	found := false
 	for _, item := range catalog.Items {
 		if item.ID == "gpt-daybreak-blue-latest" {
-			if item.Source != ModelSourceUpstreamManifest || item.Category != ModelCategoryCodex || !item.Enabled {
-				t.Fatalf("learned item = %+v", item)
+			found = true
+			if item.Source != ModelSourceBuiltin || item.Category != ModelCategoryCodex || !item.Enabled || item.APIKeyAuthAvailable {
+				t.Fatalf("builtin item = %+v", item)
 			}
 		}
 	}
+	if !found {
+		t.Fatalf("builtin alias missing from catalog items: %#v", catalog.Items)
+	}
 	if !slices.Contains(SupportedModelIDs(ctx, db), "gpt-daybreak-blue-latest") {
-		t.Fatal("learned alias must be accepted by the request-side model gate immediately")
+		t.Fatal("builtin alias must be accepted by the request-side model gate immediately")
 	}
 	if isRetiredCodexModel("gpt-daybreak-blue-latest") {
 		t.Fatal("non-versioned alias must never be treated as retired")
@@ -542,7 +568,7 @@ func TestMergeModelInfosPutsSyncedModelsFirstNewestFirst(t *testing.T) {
 	for _, info := range merged {
 		ids = append(ids, info.ID)
 	}
-	wantHead := []string{"gpt-7", "gpt-6-nova", "gpt-5.7-sol", "gpt-5.7-terra", "gpt-daybreak-blue-latest"}
+	wantHead := []string{"gpt-7", "gpt-6-nova", "gpt-5.7-sol", "gpt-5.7-terra"}
 	if !slices.Equal(ids[:len(wantHead)], wantHead) {
 		t.Fatalf("head = %v, want %v", ids[:len(wantHead)], wantHead)
 	}
