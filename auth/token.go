@@ -88,7 +88,7 @@ func RefreshAccessToken(ctx context.Context, refreshToken string, proxyURL strin
 	// Resin 反代模式下使用标准 HTTP client（不走代理，Resin 处理路由）
 	var client *http.Client
 	if ResinRequestDecorator != nil && accountID != "" {
-		client = &http.Client{Timeout: 30 * time.Second}
+		client = &http.Client{Transport: WrapOutboundHeaderLog("auth-resin", http.DefaultTransport), Timeout: 30 * time.Second}
 	} else {
 		client = buildUTLSHTTPClient(proxyURL)
 	}
@@ -230,7 +230,7 @@ func RefreshWithSessionToken(ctx context.Context, sessionToken string, proxyURL 
 
 	var client *http.Client
 	if ResinRequestDecorator != nil && accountID != "" {
-		client = &http.Client{Timeout: 30 * time.Second}
+		client = &http.Client{Transport: WrapOutboundHeaderLog("auth-resin", http.DefaultTransport), Timeout: 30 * time.Second}
 	} else {
 		client = buildUTLSHTTPClient(proxyURL)
 	}
@@ -638,7 +638,7 @@ func buildHTTPClientChecked(proxyURL string, strict bool) (*http.Client, error) 
 	}
 
 	client := &http.Client{
-		Transport: transport,
+		Transport: WrapOutboundHeaderLog("auth", transport),
 		Timeout:   30 * time.Second,
 	}
 

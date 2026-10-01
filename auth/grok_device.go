@@ -243,7 +243,7 @@ func grokHTTPClient(proxyURL string) (*http.Client, error) {
 	if err := ConfigureTransportProxy(transport, proxyURL, nil); err != nil {
 		return nil, fmt.Errorf("代理配置失败: %w", err)
 	}
-	return &http.Client{Transport: transport, Timeout: 30 * time.Second}, nil
+	return &http.Client{Transport: WrapOutboundHeaderLog("grok", transport), Timeout: 30 * time.Second}, nil
 }
 
 func parseGrokIDTokenIdentity(idToken string) (email, subject string) {

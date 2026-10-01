@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
 )
 
@@ -75,6 +76,7 @@ func SyncOfficialModelPricing(ctx context.Context, db *database.DB, proxyURL str
 	// 与版本同步共用浏览器传输：HTTPS 使用 uTLS，兼容环境代理并显式释放连接。
 	client, closeClient := newVersionSyncClient(OfficialOpenAIPricingURL, proxyURL, officialPricingTimeout)
 	defer closeClient()
+	client.Transport = auth.WrapOutboundHeaderLog("official-pricing-sync", client.Transport)
 	sync.fetch(ctx, client)
 	sync.fetchReferences(ctx, proxyURL)
 	if err := ctx.Err(); err != nil {

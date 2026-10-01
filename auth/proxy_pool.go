@@ -551,7 +551,7 @@ func (p *ProxyPool) checkProxy(ctx context.Context, entry *ProxyEntry) *HealthCh
 	}
 
 	client := &http.Client{
-		Transport: transport,
+		Transport: WrapOutboundHeaderLog("proxy-healthcheck", transport),
 		Timeout:   p.timeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse

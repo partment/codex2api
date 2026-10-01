@@ -30,6 +30,7 @@ func (m *Manager) createConnection(ctx context.Context, input connectionDialRequ
 		return nil, err
 	}
 	session, poolKey := m.newDialSession(ctx, input)
+	auth.LogOutboundWSHandshake("codex-ws", input.url, input.headers)
 	conn, resp, err := dialer.DialContext(ctx, input.url, input.headers)
 	if err != nil {
 		m.sessions.CompareAndDelete(poolKey, session)

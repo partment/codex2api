@@ -227,7 +227,7 @@ func newOpenAIResponsesBalanceClient(proxyURL string) (*http.Client, error) {
 	if err := auth.ConfigureTransportProxy(transport, proxyURL, dialer); err != nil {
 		return nil, fmt.Errorf("代理URL无效: %w", err)
 	}
-	return &http.Client{Transport: transport, Timeout: 15 * time.Second}, nil
+	return &http.Client{Transport: auth.WrapOutboundHeaderLog("openai-balance", transport), Timeout: 15 * time.Second}, nil
 }
 
 func fetchOpenAIResponsesBalancePayload(

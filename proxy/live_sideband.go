@@ -132,6 +132,7 @@ func (h *Handler) dialLiveSideband(ctx context.Context, record *liveCallRecord) 
 			}
 		}
 	}
+	auth.LogOutboundWSHandshake("live-sideband", target, headers)
 	conn, resp, err := dialer.DialContext(ctx, target, headers)
 	if resp != nil && resp.Body != nil {
 		_ = resp.Body.Close()

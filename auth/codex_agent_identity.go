@@ -211,7 +211,7 @@ func registerAgentIdentityTask(ctx context.Context, key agentIdentityRuntimeKey,
 	}
 	if accountBound {
 		if proxyURL == "" {
-			client.Transport.(*http.Transport).Proxy = nil
+			UnwrapOutboundHeaderLog(client.Transport).(*http.Transport).Proxy = nil
 		}
 		defer client.CloseIdleConnections()
 	}

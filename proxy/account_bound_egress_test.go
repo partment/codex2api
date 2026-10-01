@@ -149,12 +149,12 @@ func TestAccountBoundEgressTransportModeAndAccountPools(t *testing.T) {
 	ctx := WithAccountBoundEgress(context.Background(), "")
 	t.Setenv("CODEX_TRANSPORT_MODE", "standard")
 	standard := getRequestClient(ctx, account, "")
-	if transport, ok := standard.Transport.(*http.Transport); !ok || transport.Proxy != nil {
+	if transport, ok := auth.UnwrapOutboundHeaderLog(standard.Transport).(*http.Transport); !ok || transport.Proxy != nil {
 		t.Fatal("direct standard TLS transport or route lost")
 	}
 	t.Setenv("CODEX_TRANSPORT_MODE", "utls_chrome")
 	chrome := getRequestClient(ctx, account, "")
-	if _, ok := chrome.Transport.(*utlsRoundTripper); !ok {
+	if _, ok := auth.UnwrapOutboundHeaderLog(chrome.Transport).(*utlsRoundTripper); !ok {
 		t.Fatal("uTLS transport mode lost")
 	}
 	if chrome == standard || chrome == getRequestClient(ctx, &auth.Account{DBID: 998121}, "") {
