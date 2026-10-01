@@ -166,7 +166,9 @@ func (r *continuousRetryReplay) Close() error {
 		r.file = nil
 	}
 	if r.filePath != "" {
-		_ = os.Remove(r.filePath)
+		if err := os.Remove(r.filePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			closeErr = errContinuousRetryReplayStorage
+		}
 		r.filePath = ""
 	}
 	return closeErr
