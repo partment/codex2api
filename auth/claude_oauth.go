@@ -285,7 +285,7 @@ func buildPlainClaudeOAuthClient(proxyURL string) *http.Client {
 	if strings.TrimSpace(proxyURL) != "" {
 		_ = ConfigureTransportProxy(tr, proxyURL, nil)
 	}
-	return &http.Client{Transport: tr, Timeout: claudeOAuthHTTPTimeout}
+	return &http.Client{Transport: WrapOutboundHeaderLog("claude-oauth", tr), Timeout: claudeOAuthHTTPTimeout}
 }
 
 // doWithFallback 用 primary 发送请求;传输错误或 403 挑战时,用 fallback 以全新请求

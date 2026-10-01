@@ -321,7 +321,7 @@ func isCloudflareChallenge(status int, body []byte) bool {
 func inviteHTTPClient(account *auth.Account, proxyURL string, useTestTransport bool) *http.Client {
 	jar := inviteCookieJarFor(account)
 	if useTestTransport {
-		return &http.Client{Transport: newCodexStandardTransport(proxyURL), Jar: jar}
+		return &http.Client{Transport: auth.WrapOutboundHeaderLog("codex-invite", newCodexStandardTransport(proxyURL)), Jar: jar}
 	}
 	pooled := getMaintenanceClient(account, proxyURL, maintenancePurposeInvite, true)
 	return &http.Client{Transport: pooled.Transport, Jar: jar}

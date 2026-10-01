@@ -86,6 +86,7 @@ func fetchClaudeJSON(ctx context.Context, endpoint, proxyURL string, github bool
 	}
 	client, closeClient := newVersionSyncClient(endpoint, proxyURL, 20*time.Second)
 	defer closeClient()
+	client.Transport = auth.WrapOutboundHeaderLog("claude-version-sync", client.Transport)
 	resp, err := client.Do(req)
 	if err != nil {
 		return err

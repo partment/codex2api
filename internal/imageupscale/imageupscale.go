@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/codex2api/auth"
 	"github.com/codex2api/internal/imageproc"
 )
 
@@ -216,6 +217,7 @@ func upscaleToBox(ctx context.Context, imageBytes []byte, targetWidth, targetHei
 		return nil, "", "", err
 	}
 	request.Header.Set("Content-Type", http.DetectContentType(imageBytes))
+	auth.LogOutboundHTTPRequest("image-upscaler", request)
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		return nil, "", "", fmt.Errorf("call image upscaler: %w", err)
@@ -301,6 +303,7 @@ func upscaleToBoxWithFit(ctx context.Context, imageBytes []byte, targetWidth, ta
 		return nil, "", "", err
 	}
 	request.Header.Set("Content-Type", http.DetectContentType(imageBytes))
+	auth.LogOutboundHTTPRequest("image-upscaler", request)
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		return nil, "", "", fmt.Errorf("call image upscaler: %w", err)

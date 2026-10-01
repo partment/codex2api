@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
 )
 
@@ -95,7 +96,7 @@ func fetchModelPricingJSON(ctx context.Context, syncURL, proxyURL string) (map[s
 
 	// 目标是 GitHub 域（默认定价 JSON 在 raw.githubusercontent.com）时套用专用代理；
 	// URL 可被部署方改成任意地址，故这里绝不附加 github_token。
-	client := &http.Client{Transport: newCodexStandardTransport(GithubProxyOrDefault(syncURL, proxyURL)), Timeout: 20 * time.Second}
+	client := &http.Client{Transport: auth.WrapOutboundHeaderLog("model-pricing-sync", newCodexStandardTransport(GithubProxyOrDefault(syncURL, proxyURL))), Timeout: 20 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("pricing request: %w", err)

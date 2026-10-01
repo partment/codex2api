@@ -23,7 +23,7 @@ func TestGetCodexMaintenanceClientIsReusedPerAccount(t *testing.T) {
 	if first != second {
 		t.Fatal("同一账号两次取用返回了不同 Client：一次性 transport 会持续泄漏连接与 goroutine")
 	}
-	if _, ok := first.Transport.(*utlsRoundTripper); !ok {
+	if _, ok := auth.UnwrapOutboundHeaderLog(first.Transport).(*utlsRoundTripper); !ok {
 		t.Fatalf("utls_chrome 模式下 transport = %T, want *utlsRoundTripper", first.Transport)
 	}
 }
@@ -69,7 +69,7 @@ func TestSubscriptionMaintenanceClientForcesUTLS(t *testing.T) {
 	acc := &auth.Account{DBID: 4464}
 	client := getMaintenanceClient(acc, "", maintenancePurposeSubscription, true)
 
-	if _, ok := client.Transport.(*utlsRoundTripper); !ok {
+	if _, ok := auth.UnwrapOutboundHeaderLog(client.Transport).(*utlsRoundTripper); !ok {
 		t.Fatalf("订阅同步 transport = %T, want *utlsRoundTripper（普通指纹会被 Cloudflare 拦截）", client.Transport)
 	}
 }

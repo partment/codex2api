@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
 	"golang.org/x/net/html"
 )
@@ -70,7 +71,7 @@ func SyncOfficialModelPricing(ctx context.Context, db *database.DB, proxyURL str
 
 	result := &OfficialPricingSyncResult{SyncedAt: time.Now().UTC()}
 	pricing := make(map[string]database.ModelPricingOverride)
-	client := &http.Client{Transport: newCodexStandardTransport(proxyURL), Timeout: 20 * time.Second}
+	client := &http.Client{Transport: auth.WrapOutboundHeaderLog("official-pricing-sync", newCodexStandardTransport(proxyURL)), Timeout: 20 * time.Second}
 
 	if options.IncludeOpenAI {
 		body, err := fetchOfficialPricingMarkdown(ctx, client, OfficialOpenAIPricingURL)
