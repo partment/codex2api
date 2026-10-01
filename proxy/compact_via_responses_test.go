@@ -139,6 +139,7 @@ func TestAppendCompactionTriggerToResponsesBody_StringInput(t *testing.T) {
 }
 
 func TestCollectCompactResponsesSSE_AggregatesCompactionItem(t *testing.T) {
+	requestBody := []byte(`{"input":[{"role":"developer","content":"Keep this instruction"},{"type":"message","role":"user","content":"Compact conversation"},{"type":"message","role":"assistant","content":"discard me"},{"type":"compaction_trigger"}]}`)
 	sse := strings.Join([]string{
 		`data: {"type":"response.created","response":{"id":"resp_1","status":"in_progress","output":[]}}`,
 		``,
@@ -150,7 +151,7 @@ func TestCollectCompactResponsesSSE_AggregatesCompactionItem(t *testing.T) {
 		``,
 	}, "\n")
 
-	respJSON, failed, err := collectCompactResponsesSSE(strings.NewReader(sse))
+	respJSON, failed, err := collectCompactResponsesSSE(strings.NewReader(sse), requestBody)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -158,13 +159,16 @@ func TestCollectCompactResponsesSSE_AggregatesCompactionItem(t *testing.T) {
 		t.Fatalf("unexpected failed payload: %s", failed)
 	}
 	output := gjson.GetBytes(respJSON, "output").Array()
-	if len(output) != 1 {
-		t.Fatalf("output 应恰好包含 1 条 compaction item, got %d: %s", len(output), respJSON)
+	if object := gjson.GetBytes(respJSON, "object").String(); object != "response.compaction" {
+		t.Fatalf("object = %q, want response.compaction: %s", object, respJSON)
 	}
-	if got := output[0].Get("type").String(); got != "compaction" {
+	if len(output) != 3 {
+		t.Fatalf("output 应包含保留的 developer/user 消息与 compaction item, got %d: %s", len(output), respJSON)
+	}
+	if got := output[2].Get("type").String(); got != "compaction" {
 		t.Fatalf("output item 类型应为 compaction, got %q", got)
 	}
-	if got := output[0].Get("encrypted_content").String(); got != "opaque-blob" {
+	if got := output[2].Get("encrypted_content").String(); got != "opaque-blob" {
 		t.Fatalf("应保留 done 事件的最终内容, got %q", got)
 	}
 	if got := gjson.GetBytes(respJSON, "usage.total_tokens").Int(); got != 79 {
@@ -180,7 +184,7 @@ func TestCollectCompactResponsesSSE_ReturnsFailedPayload(t *testing.T) {
 		``,
 	}, "\n")
 
-	respJSON, failed, err := collectCompactResponsesSSE(strings.NewReader(sse))
+	respJSON, failed, err := collectCompactResponsesSSE(strings.NewReader(sse), nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -195,8 +199,33 @@ func TestCollectCompactResponsesSSE_ReturnsFailedPayload(t *testing.T) {
 func TestCollectCompactResponsesSSE_MissingTerminalIsError(t *testing.T) {
 	sse := `data: {"type":"response.created","response":{"id":"resp_1","status":"in_progress"}}` + "\n"
 
-	_, _, err := collectCompactResponsesSSE(strings.NewReader(sse))
+	_, _, err := collectCompactResponsesSSE(strings.NewReader(sse), nil)
 	if err == nil {
 		t.Fatal("缺少终止事件应返回错误")
+	}
+}
+
+func TestCollectCompactResponsesSSE_RejectsDuplicateCompactionItems(t *testing.T) {
+	sse := strings.Join([]string{
+		`data: {"type":"response.output_item.done","item":{"id":"cmp_1","type":"compaction","encrypted_content":"one"}}`,
+		``,
+		`data: {"type":"response.output_item.done","item":{"id":"cmp_2","type":"compaction","encrypted_content":"two"}}`,
+		``,
+		`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[]}}`,
+		``,
+	}, "\n")
+
+	_, _, err := collectCompactResponsesSSE(strings.NewReader(sse), nil)
+	if err == nil || !strings.Contains(err.Error(), "exactly one compaction") {
+		t.Fatalf("duplicate compaction error = %v", err)
+	}
+}
+
+func TestCollectCompactResponsesSSE_RejectsMissingCompactionItem(t *testing.T) {
+	sse := `data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[]}}` + "\n\n"
+
+	_, _, err := collectCompactResponsesSSE(strings.NewReader(sse), nil)
+	if err == nil || !strings.Contains(err.Error(), "exactly one compaction") {
+		t.Fatalf("missing compaction error = %v", err)
 	}
 }
