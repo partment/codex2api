@@ -1,8 +1,11 @@
 package proxy
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +14,19 @@ import (
 
 	"github.com/codex2api/auth"
 )
+
+// isolateCodexTelemetry keeps parsed terminal events in a test-owned queue.
+// Starting the process-wide workers would leave a one-minute metrics ticker
+// posting into unrelated Resin mocks (or the real upstream) after this test.
+func isolateCodexTelemetry(t *testing.T) *codexTelemetryManager {
+	t.Helper()
+	previous := codexTelemetryGlobal
+	manager := newCodexTelemetryManager()
+	manager.once.Do(func() {})
+	codexTelemetryGlobal = manager
+	t.Cleanup(func() { codexTelemetryGlobal = previous })
+	return manager
+}
 
 func testCodexTelemetryProfile() codexTelemetryProfile {
 	account := &auth.Account{DBID: 7, AccessToken: "test-token", AccountID: "acct-test"}
@@ -79,7 +95,8 @@ func TestCodexTelemetryDoesNotInferResume(t *testing.T) {
 }
 
 func testCodexMetricPoint(descriptor codexMetricDescriptor, value float64) *codexMetricPoint {
-	return newCodexMetricPoint(descriptor, codexMetricAttributeMap(testCodexTelemetryProfile(), descriptor), value)
+	profile := testCodexTelemetryProfile()
+	return newCodexMetricPoint(profile, descriptor, codexMetricAttributeMap(profile, descriptor), value)
 }
 
 func TestCodexTelemetryMetricsContract(t *testing.T) {
@@ -188,6 +205,56 @@ func TestCodexTelemetryMetricAggregationKeepsObservations(t *testing.T) {
 	if len(byModel) != 2 {
 		t.Fatalf("aggregation created extra points: %d", len(byModel))
 	}
+}
+
+func TestCodexTelemetryMetricResourcesDoNotUseLatestProfile(t *testing.T) {
+	m := newCodexTelemetryManager()
+	m.once.Do(func() {})
+	profileCLI := testCodexTelemetryProfile()
+	profileCLI.model = "gpt-5.6-sol"
+	profileDesktop := profileCLI
+	profileDesktop.turnID = "turn-desktop"
+	profileDesktop.client.userAgent = "Codex Desktop/0.153.4 (Windows 10.0.26200; x86_64) unknown (Codex Desktop; 26.903.61454)"
+	profileDesktop.client.originator = "Codex Desktop"
+
+	descriptor := codexMetricDescriptorIndex["codex.turn.e2e_duration_ms"]
+	state := &codexMetricState{profile: profileDesktop, started: time.Now(), points: make(map[string]*codexMetricPoint)}
+	recordCodexMetricPoint(state, profileCLI, descriptor.name, 10)
+	recordCodexMetricPoint(state, profileDesktop, descriptor.name, 1000)
+
+	var payload map[string]any
+	points := make([]*codexMetricPoint, 0, len(state.points))
+	for _, point := range state.points {
+		points = append(points, point)
+	}
+	if err := json.Unmarshal(buildCodexMetricsPayload(profileDesktop, state.started, points), &payload); err != nil {
+		t.Fatal(err)
+	}
+	resources := payload["resourceMetrics"].([]any)
+	if len(resources) != 2 {
+		t.Fatalf("resource metric groups = %d, want separate CLI and Desktop resources", len(resources))
+	}
+	seen := map[string]float64{}
+	for _, rawResource := range resources {
+		resource := rawResource.(map[string]any)
+		serviceName := testCodexOTLPAttribute(resource["resource"].(map[string]any)["attributes"].([]any), "service.name")
+		metric := resource["scopeMetrics"].([]any)[0].(map[string]any)["metrics"].([]any)[0].(map[string]any)
+		point := metric["histogram"].(map[string]any)["dataPoints"].([]any)[0].(map[string]any)
+		seen[serviceName] = point["sum"].(float64)
+	}
+	if seen["codex_cli_rs"] != 10 || seen["codex-app-server"] != 1000 {
+		t.Fatalf("resource groups used latest profile: %#v", seen)
+	}
+}
+
+func testCodexOTLPAttribute(attributes []any, name string) string {
+	for _, raw := range attributes {
+		attribute := raw.(map[string]any)
+		if attribute["key"] == name {
+			return attribute["value"].(map[string]any)["stringValue"].(string)
+		}
+	}
+	return ""
 }
 
 // TestCodexTelemetryHookHistogramCountsObservations 校验 hook 时长直方图按真实
@@ -315,8 +382,94 @@ func TestCodexDesktopMetricIdentity(t *testing.T) {
 	}
 }
 
+func TestCodexTelemetryAutoFastFallbackRecordsActualAttempts(t *testing.T) {
+	previousSettings := CurrentRuntimeSettings()
+	previousRand := codexTelemetryRandIntN
+	previousWS := WebsocketExecuteFunc
+	t.Cleanup(func() {
+		ApplyRuntimeSettings(previousSettings)
+		codexTelemetryRandIntN = previousRand
+		WebsocketExecuteFunc = previousWS
+	})
+
+	t.Setenv("CODEX_TELEMETRY_ENABLED", "1")
+	settings := previousSettings
+	settings.CodexTelemetryEnabled = true
+	settings.CodexPriorityServiceTierEnabled = true
+	settings.CodexPriorityMinRemainingRatio = 0
+	ApplyRuntimeSettings(settings)
+	manager := isolateCodexTelemetry(t)
+	codexTelemetryRandIntN = func(n int) int { return n - 1 }
+
+	model := "gpt-5.6-sol"
+	quotaPriorityUnsupportedModels.Delete(model)
+	t.Cleanup(func() { quotaPriorityUnsupportedModels.Delete(model) })
+	account := &auth.Account{DBID: 42, AccessToken: "test-token", AccountID: "acct-42"}
+	calls := 0
+	WebsocketExecuteFunc = func(_ context.Context, _ *auth.Account, body []byte, _ string, _ string, _ string, _ *DeviceProfileConfig, _ http.Header, _ string) (*http.Response, error) {
+		calls++
+		if calls == 1 {
+			if tier := extractServiceTier(body); tier != "priority" {
+				t.Fatalf("first request tier = %q", tier)
+			}
+			failure := `data: {"type":"response.failed","response":{"status_code":400,"error":{"code":"unsupported_parameter","param":"service_tier","message":"Unsupported parameter: service_tier"}}}` + "\n\n"
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(failure))}, nil
+		}
+		if tier := extractServiceTier(body); tier != "" {
+			t.Fatalf("fallback request tier = %q", tier)
+		}
+		success := `data: {"type":"response.completed","response":{"id":"resp_default","status":"completed"}}` + "\n\n"
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(success))}, nil
+	}
+
+	body := applyQuotaPriorityServiceTier(account, []byte(`{"model":"`+model+`","input":"hello"}`), 0)
+	resp, err := ExecuteRequest(context.Background(), account, body, "session-1", "", "", &DeviceProfileConfig{}, http.Header{}, true)
+	if err != nil {
+		t.Fatalf("ExecuteRequest: %v", err)
+	}
+	if _, err := io.ReadAll(resp.Body); err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if calls != 2 {
+		t.Fatalf("upstream calls = %d, want priority attempt plus fallback", calls)
+	}
+
+	statuses := map[string]int{}
+	for len(manager.queue) > 0 {
+		job := <-manager.queue
+		if job.metrics {
+			continue
+		}
+		var payload struct {
+			Events []struct {
+				Type   string         `json:"event_type"`
+				Params map[string]any `json:"event_params"`
+			} `json:"events"`
+		}
+		if err := json.Unmarshal(job.body, &payload); err != nil {
+			t.Fatal(err)
+		}
+		for _, event := range payload.Events {
+			if event.Type == "codex_turn_event" && event.Params["thread_source"] == "user" {
+				if status, ok := event.Params["status"].(string); ok {
+					statuses[status]++
+				}
+			}
+		}
+	}
+	if statuses["failed"] != 1 || statuses["completed"] != 1 {
+		t.Fatalf("terminal telemetry statuses = %#v, want one result per actual upstream attempt", statuses)
+	}
+}
+
 func TestCodexTelemetryTransportHeaders(t *testing.T) {
 	t.Setenv("CODEX_STATSIG_API_KEY", "test-statsig-key")
+	t.Setenv("OUTBOUND_HEADER_LOG", "1")
+	previousWriter := log.Writer()
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(previousWriter) })
 	requests := make(chan http.Header, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		_, _ = io.Copy(io.Discard, request.Body)
@@ -340,6 +493,13 @@ func TestCodexTelemetryTransportHeaders(t *testing.T) {
 	}
 	if metrics.Get("Authorization") != "" || metrics.Get("statsig-api-key") != "test-statsig-key" || metrics.Get("User-Agent") != "OTel-OTLP-Exporter-Rust/0.31.0" {
 		t.Fatalf("metrics headers = %#v", metrics)
+	}
+	logged := logs.String()
+	if strings.Count(logged, "[Outbound-Header]") != 2 || strings.Count(logged, "tag=codex-telemetry") != 2 {
+		t.Fatalf("telemetry requests must each log once with the dedicated tag: %s", logged)
+	}
+	if strings.Contains(logged, "test-token") || strings.Contains(logged, "test-statsig-key") {
+		t.Fatalf("telemetry header log leaked credentials: %s", logged)
 	}
 }
 
@@ -381,6 +541,7 @@ func TestCodexTelemetryTimingProbeGate(t *testing.T) {
 
 // TestCodexTelemetryTimingProbeRecordsParse 校验探针开启时统计事件数与解析耗时。
 func TestCodexTelemetryTimingProbeRecordsParse(t *testing.T) {
+	isolateCodexTelemetry(t)
 	t.Setenv("CODEX_TELEMETRY_TIMING_DEBUG", "1")
 	attempt := &codexTelemetryAttempt{profile: testCodexTelemetryProfile(), timing: true}
 	stream := "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n" +
@@ -404,6 +565,7 @@ func TestCodexTelemetryTimingProbeRecordsParse(t *testing.T) {
 // wsrelay.websocketResponseToHTTP 把每个 WebSocket 帧写成 `data: <json>\n\n`，
 // 与 HTTP 路径同形，所以两种传输共用同一套观测逻辑。
 func TestCodexTelemetryParsesWebsocketSSE(t *testing.T) {
+	isolateCodexTelemetry(t)
 	attempt := &codexTelemetryAttempt{profile: testCodexTelemetryProfile()}
 	stream := "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n" +
 		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_ws\"}}\n\n"
@@ -425,6 +587,29 @@ func TestCodexTelemetryParsesWebsocketSSE(t *testing.T) {
 func TestCodexTelemetryDefaultOff(t *testing.T) {
 	if DefaultRuntimeSettings().CodexTelemetryEnabled {
 		t.Fatal("simulated telemetry must be opt-in")
+	}
+}
+
+func TestCodexTelemetryDeploymentKillSwitches(t *testing.T) {
+	previous := CurrentRuntimeSettings()
+	t.Cleanup(func() { ApplyRuntimeSettings(previous) })
+	settings := previous
+	settings.CodexTelemetryEnabled = true
+	ApplyRuntimeSettings(settings)
+
+	t.Setenv("CODEX_TELEMETRY_ENABLED", "1")
+	t.Setenv("CODEX_TELEMETRY_DISABLED", "")
+	if !codexTelemetryEnabled() {
+		t.Fatal("enabled runtime telemetry was unexpectedly disabled")
+	}
+	t.Setenv("CODEX_TELEMETRY_DISABLED", "yes")
+	if codexTelemetryEnabled() {
+		t.Fatal("CODEX_TELEMETRY_DISABLED must force telemetry off")
+	}
+	t.Setenv("CODEX_TELEMETRY_DISABLED", "")
+	t.Setenv("CODEX_TELEMETRY_ENABLED", "false")
+	if codexTelemetryEnabled() {
+		t.Fatal("CODEX_TELEMETRY_ENABLED=false must force telemetry off")
 	}
 }
 
@@ -504,6 +689,7 @@ func TestCodexTelemetryProfileIgnoresLocalAffinityKey(t *testing.T) {
 }
 
 func TestCodexTelemetryBodyCloseRacesRead(t *testing.T) {
+	isolateCodexTelemetry(t)
 	pr, pw := io.Pipe()
 	attempt := &codexTelemetryAttempt{profile: testCodexTelemetryProfile()}
 	body := &codexTelemetryBody{ReadCloser: pr, attempt: attempt}
