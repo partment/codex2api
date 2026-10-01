@@ -1021,11 +1021,12 @@ func (h *Handler) Messages(c *gin.Context) {
 				return
 			}
 			// service_tier 记账按 payload 规则改写后的值归因（仅 Codex 路径套用规则）。
-			serviceTier = EffectiveRequestedServiceTier(codexBody, attemptEffectiveModel, downstreamHeaders, attemptIdentity)
+			upstreamBody := applyQuotaPriorityServiceTier(account, codexBody, h.store.GetUsageProbeMaxAge())
+			serviceTier = EffectiveRequestedServiceTier(upstreamBody, attemptEffectiveModel, downstreamHeaders, attemptIdentity)
 			upstreamCtx = WithCodexTurnStateAffinityKey(upstreamCtx, affinityKey)
 			guardCodexTurnStateEcho(affinityKey, account, downstreamHeaders)
 			resp, reqErr = executeHTTPWithContinuousRetryKeepalive(upstreamCtx, func() (*http.Response, error) {
-				return executeAnthropicCodexRequest(upstreamCtx, account, codexBody, canonicalBody, upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders, useWebsocket)
+				return executeAnthropicCodexRequest(upstreamCtx, account, upstreamBody, canonicalBody, upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders, useWebsocket)
 			})
 		}
 		durationMs := int(time.Since(start).Milliseconds())
