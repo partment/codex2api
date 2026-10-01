@@ -21,9 +21,56 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// Codex OAuth manifests must never advertise a larger input context to clients.
+const codexOAuthContextWindow = 372_000
+
+// capCodexOAuthManifestContext preserves unknown model fields and the original
+// manifest for capability learning. Only numeric context limits are reduced.
+func capCodexOAuthManifestContext(body []byte, allowed func(string) bool) ([]byte, error) {
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(body, &root); err != nil {
+		return nil, fmt.Errorf("invalid codex manifest JSON: %w", err)
+	}
+	var models []map[string]json.RawMessage
+	if root == nil || json.Unmarshal(root["models"], &models) != nil || models == nil {
+		return nil, fmt.Errorf("unsupported codex manifest schema: models is not an array")
+	}
+	changed := false
+	for _, model := range models {
+		if model == nil {
+			return nil, fmt.Errorf("unsupported codex manifest schema: invalid model item")
+		}
+		var slug string
+		if json.Unmarshal(model["slug"], &slug) != nil || strings.TrimSpace(slug) == "" {
+			return nil, fmt.Errorf("unsupported codex manifest schema: model slug is missing")
+		}
+		if allowed != nil && !allowed(slug) {
+			continue
+		}
+		for _, field := range []string{"context_window", "max_context_window"} {
+			raw := model[field]
+			var window int64
+			if len(raw) > 0 && json.Unmarshal(raw, &window) == nil && window > codexOAuthContextWindow {
+				model[field] = json.RawMessage("372000")
+				changed = true
+			}
+		}
+	}
+	if !changed {
+		return body, nil
+	}
+	encoded, err := json.Marshal(models)
+	if err != nil {
+		return nil, err
+	}
+	root["models"] = encoded
+	return json.Marshal(root)
+}
+
 // CodexModelsManifestHandler 向 Codex 客户端提供模型清单。
 //
-// 有可调度的 ChatGPT OAuth 账号时，凭据实时转发官方清单（响应体与 ETag 原样透传）。
+// 有可调度的 ChatGPT OAuth 账号时，用凭据实时取得官方清单；仅对外回报的
+// 上下文窗口限为 372K，并使用本地 ETag。上游原文仍用于能力学习。
 // Antigravity / 仅中转号池没有 ChatGPT 账号：把与 Cockpit 相同的 /v1/models
 // 目录改写成 Codex 期望的 {"models":[{"slug":...}]}，避免客户端 503 后静默
 // 冻结在本地缓存（选单不全、模型信息联不通）。
@@ -44,20 +91,15 @@ func (h *Handler) CodexModelsManifestHandler(c *gin.Context) {
 	}
 	restrictManifest := codexManifestNeedsFiltering(row, account)
 	extraModels := h.extraRelayManifestModels(c.Request.Context(), row)
-	ifNoneMatch := c.GetHeader("If-None-Match")
-	if restrictManifest || len(extraModels) > 0 {
-		// Restricted responses use a gateway ETag derived from the filtered
-		// or locally merged representation. It is not an upstream validator, and
-		// forwarding it can produce a body-less 304 that cannot be rebuilt safely.
-		ifNoneMatch = ""
-	}
 
+	// The outbound representation may differ from the upstream manifest. A
+	// client ETag must never be forwarded upstream: its 304 has no body to cap.
 	manifest, err := FetchCodexModelsManifest(
 		c.Request.Context(),
 		account,
 		h.store.ResolveProxyForAccount(account),
 		c.Query("client_version"),
-		ifNoneMatch,
+		"",
 	)
 	if err != nil {
 		if h.serveScopedCodexManifest(c, row) {
@@ -85,22 +127,35 @@ func (h *Handler) CodexModelsManifestHandler(c *gin.Context) {
 				http.StatusBadGateway)
 			return
 		}
+		// Keep learning the unmodified upstream capabilities.
 		h.learnManifestModelsAsync(manifest.Body, account)
-		h.writeMergedCodexManifest(c, body, "", extraModels)
+		capped, capErr := capCodexOAuthManifestContext(body, nil)
+		if capErr != nil {
+			api.SendErrorWithStatus(c,
+				api.NewAPIError(api.ErrCodeUpstreamError, fmt.Sprintf("codex models manifest: %v", capErr), api.ErrorTypeUpstream),
+				http.StatusBadGateway)
+			return
+		}
+		h.writeMergedCodexManifest(c, capped, "", extraModels)
 		return
 	}
 
 	if manifest.NotModified {
-		if manifest.ETag != "" {
-			c.Header("ETag", manifest.ETag)
-		}
-		c.Status(http.StatusNotModified)
+		api.SendErrorWithStatus(c,
+			api.NewAPIError(api.ErrCodeUpstreamError, "codex models manifest returned an unusable 304", api.ErrorTypeUpstream),
+			http.StatusBadGateway)
 		return
 	}
-	// 顺手把清单里注册表不认识的新模型学习进注册表（只增不改不删），
-	// 让选单里出现的新模型立即通过请求侧模型校验，无需等手动同步。
+	// Learn from the original descriptor, but only serve the capped version.
 	h.learnManifestModelsAsync(manifest.Body, account)
-	h.writeMergedCodexManifest(c, manifest.Body, manifest.ETag, extraModels)
+	capped, capErr := capCodexOAuthManifestContext(manifest.Body, nil)
+	if capErr != nil {
+		api.SendErrorWithStatus(c,
+			api.NewAPIError(api.ErrCodeUpstreamError, fmt.Sprintf("codex models manifest: %v", capErr), api.ErrorTypeUpstream),
+			http.StatusBadGateway)
+		return
+	}
+	h.writeMergedCodexManifest(c, capped, "", extraModels)
 }
 
 func (h *Handler) preferScopedCodexManifest(c *gin.Context) bool {
@@ -121,7 +176,18 @@ func (h *Handler) serveScopedCodexManifest(c *gin.Context, row *database.APIKeyR
 		return false
 	}
 	body = h.applyStoredModelCapabilities(c.Request.Context(), row, body)
-	h.writeCodexManifest(c, body, "")
+	// Scoped manifests can mix OAuth and relay models. Cap only models that
+	// actually have Codex OAuth backing, never provider-only models.
+	records := h.scopedModelRecords(c.Request.Context(), row)
+	capped, err := capCodexOAuthManifestContext(body, func(slug string) bool {
+		record := records[strings.ToLower(slug)]
+		return record != nil && record.backing&modelBackingCodex != 0
+	})
+	if err != nil {
+		log.Printf("cap scoped Codex manifest context: %v", err)
+		return false
+	}
+	h.writeCodexManifest(c, capped, "")
 	return true
 }
 
@@ -441,7 +507,7 @@ const CodexModelsManifestURL = "https://chatgpt.com/backend-api/codex/models"
 // codexModelsManifestURLForTest 允许测试替换默认 URL。生产代码不要赋值。
 var codexModelsManifestURLForTest = ""
 
-// CodexModelsManifest 承载上游清单原文与缓存元数据，供 handler 原样透传给客户端。
+// CodexModelsManifest 承载上游清单原文与缓存元数据，供 handler 处理后回传。
 type CodexModelsManifest struct {
 	Body        []byte
 	ETag        string
