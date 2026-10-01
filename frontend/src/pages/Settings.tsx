@@ -3243,7 +3243,7 @@ export default function Settings() {
       category: id.includes('image') ? 'image' : 'codex',
       source: 'builtin',
       pro_only: id === 'gpt-5.3-codex-spark',
-      api_key_auth_available: !['gpt-5.5', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna'].includes(id),
+      api_key_auth_available: !['gpt-5.5', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-daybreak-blue-latest'].includes(id),
     }))
   }, [modelItems, modelList])
   const codexModelOptions = visibleModelItems
