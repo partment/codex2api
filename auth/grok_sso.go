@@ -155,7 +155,7 @@ func ConvertGrokSSOToBuild(ctx context.Context, ssoToken, proxyURL string) (*Gro
 	flow := &grokSSOFlow{
 		// 手动跟随跳转：需要逐跳捕获 Set-Cookie 并校验目标域，禁用默认自动跳转。
 		client: &http.Client{
-			Transport:     transport,
+			Transport:     WrapOutboundHeaderLog("grok-sso", transport),
 			Timeout:       90 * time.Second,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},

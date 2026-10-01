@@ -334,7 +334,7 @@ func buildUTLSHTTPClient(proxyURL string) *http.Client {
 
 	transport := newUTLSAuthTransport(proxyURL)
 	client := &http.Client{
-		Transport: transport,
+		Transport: WrapOutboundHeaderLog("auth-utls", transport),
 		Timeout:   30 * time.Second,
 	}
 

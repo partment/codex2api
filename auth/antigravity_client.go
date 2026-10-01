@@ -381,7 +381,7 @@ func NewAntigravityClient(proxyURL string) (*AntigravityClient, error) {
 	if err := ConfigureTransportProxy(cloned, proxyURL, nil); err != nil {
 		return nil, err
 	}
-	return newAntigravityClient(&http.Client{Transport: cloned, Timeout: 30 * time.Second}, DefaultAntigravityEndpoints), nil
+	return newAntigravityClient(&http.Client{Transport: WrapOutboundHeaderLog("antigravity-auth", cloned), Timeout: 30 * time.Second}, DefaultAntigravityEndpoints), nil
 }
 
 // AntigravityClientVersion is the Antigravity Hub release reported to Cloud
