@@ -71,7 +71,7 @@ func TestSelectionBudgetIncludesInitialScan(t *testing.T) {
 			calls++
 			// A synchronous filter cannot be preempted, but after it returns
 			// the expired budget must stop all subsequent expensive checks.
-			time.Sleep(16 * time.Second)
+			time.Sleep(accountSelectionTimeout/2 + time.Second)
 			return false
 		}
 		h := &Handler{store: store}
@@ -99,7 +99,7 @@ func TestSelectionSuccessPreservesRequestLifetime(t *testing.T) {
 			t.Fatalf("selection = %v, %v", got, err)
 		}
 		defer store.Release(got)
-		time.Sleep(31 * time.Second)
+		time.Sleep(accountSelectionTimeout + time.Second)
 		if ctx.Err() != nil || got.GetActiveRequests() != 1 {
 			t.Fatalf("selection timeout affected upstream lifetime: context=%v, active=%d", ctx.Err(), got.GetActiveRequests())
 		}

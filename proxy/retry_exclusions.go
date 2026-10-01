@@ -451,10 +451,10 @@ func waitForContinuousPoolRetry(ctx context.Context) bool {
 
 // dispatchAccountWaitTimeout is one queue admission. Tests shorten it so a
 // saturated pool can fail without sleeping the production interval.
-var dispatchAccountWaitTimeout = 30 * time.Second
+var dispatchAccountWaitTimeout = 5 * time.Minute
 
 // waitForRetryAccountAvailable keeps one queue admission for the normal
-// 30-second wait, including continuous-retry SSE/WebSocket heartbeats.
+// Five-minute wait, including continuous-retry SSE/WebSocket heartbeats.
 func (h *Handler) waitForRetryAccountAvailable(ctx context.Context, affinityKey string, apiKeyID int64, exclude map[int64]bool, filter auth.AccountFilter, preserveBinding bool, policy auth.DispatchPolicy) (*auth.Account, string, error) {
 	account, proxyURL, _, err := h.waitForRetryAccountAvailableWithGuard(ctx, affinityKey, apiKeyID, exclude, filter, preserveBinding, policy)
 	return account, proxyURL, err
@@ -524,7 +524,7 @@ func (h *Handler) nextRetryAccount(ctx context.Context, affinityKey string, apiK
 // pool waits/retry cycles. The upstream first-token guard starts too late to
 // protect this phase. This context is canceled on return, so it never limits a
 // successfully selected account's subsequent streaming response.
-const accountSelectionTimeout = 30 * time.Second
+const accountSelectionTimeout = 5 * time.Minute
 
 func selectionFilterWithContext(ctx context.Context, filter auth.AccountFilter) auth.AccountFilter {
 	return func(acc *auth.Account) bool {
