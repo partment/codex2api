@@ -689,9 +689,10 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 
 	// 2. 清理可能导致上游报错的多余字段
 	requestBody = jsonbody.DeletePath(requestBody, "previous_response_id")
-	// 注意：HTTP /responses 上游不接受 prompt_cache_retention（会 400），必须删除；
-	// 该字段的 cache 收益只在 WS 路径注入（见 wsrelay 的 prepareWebsocketBody）。
+	// Codex HTTP rejects retention/options. Removing these controls does not
+	// disable caching; prompt_cache_key remains independently supported below.
 	requestBody = jsonbody.DeletePath(requestBody, "prompt_cache_retention")
+	requestBody = jsonbody.DeletePath(requestBody, "prompt_cache_options")
 	requestBody = jsonbody.DeletePath(requestBody, "safety_identifier")
 	requestBody = jsonbody.DeletePath(requestBody, "disable_response_storage")
 	// 顶层 type 是 Responses WS 事件信封字段（response.create），native WS ingress 的
@@ -1139,8 +1140,9 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 		requestBody, _ = sjson.SetBytes(requestBody, "instructions", "")
 	}
 	requestBody = jsonbody.DeletePath(requestBody, "previous_response_id")
-	// compact 端点同样走 HTTP，不接受 prompt_cache_retention，必须删除。
+	// Compact shares the Codex HTTP prompt-cache compatibility boundary.
 	requestBody = jsonbody.DeletePath(requestBody, "prompt_cache_retention")
+	requestBody = jsonbody.DeletePath(requestBody, "prompt_cache_options")
 	requestBody = jsonbody.DeletePath(requestBody, "safety_identifier")
 	requestBody = jsonbody.DeletePath(requestBody, "disable_response_storage")
 	// 顶层 type 是 WS 事件信封字段，compact HTTP 端点同样不接受，兜底删除(issue #548)。
