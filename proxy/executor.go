@@ -528,6 +528,7 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	if headers == nil {
 		headers = make(http.Header)
 	}
+	telemetrySessionID := sessionID
 	resetUpstreamUserAgentAudit(ctx)
 	resetWsAcquireAudit(ctx)
 	var encryptedAttempt *encryptedContentAttempt
@@ -575,14 +576,6 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	if account.IsCodexAgentIdentity() {
 		wantWebsocket = false
 	}
-	var telemetryAttempt *codexTelemetryAttempt
-	if !detectorProbe {
-		telemetryAttempt = beginCodexTelemetry(codexTelemetryRequest{
-			account: account, body: requestBody, sessionID: sessionID, proxyOverride: proxyOverride,
-			apiKey: apiKey, deviceCfg: deviceCfg, headers: headers,
-		})
-	}
-	defer func() { telemetryAttempt.observeResult(upstreamResponse, upstreamErr) }()
 	poolRouteKey := ""
 	if wantWebsocket {
 		sessionID = strings.TrimSpace(sessionID)
@@ -627,9 +620,17 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 			traceProxy = account.ProxyURL
 			account.Mu().RUnlock()
 		}
+		var telemetryAttempt *codexTelemetryAttempt
+		if !detectorProbe {
+			telemetryAttempt = beginCodexTelemetry(codexTelemetryRequest{
+				account: account, body: requestBody, sessionID: telemetrySessionID, proxyOverride: proxyOverride,
+				apiKey: apiKey, deviceCfg: deviceCfg, headers: headers,
+			})
+		}
 		recordTrace := beginUpstreamTrace(ctx, account, traceProxy, true)
 		resp, err := WebsocketExecuteFunc(ctx, account, requestBody, sessionID, proxyOverride, apiKey, deviceCfg, headers, poolRouteKey)
 		recordTrace(resp)
+		telemetryAttempt.observeResult(resp, err)
 		if !autoFastFallback {
 			return resp, err
 		}
@@ -788,13 +789,23 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 			pipeline.Release()
 			log.Printf("[image-pipeline] job=%d stage=waiting_upstream request_bytes=%d", pipeline.jobID, req.ContentLength)
 		}
+		var telemetryAttempt *codexTelemetryAttempt
+		if !detectorProbe {
+			telemetryAttempt = beginCodexTelemetry(codexTelemetryRequest{
+				account: account, body: requestBody, sessionID: telemetrySessionID, proxyOverride: proxyOverride,
+				apiKey: apiKey, deviceCfg: deviceCfg, headers: req.Header,
+			})
+		}
 		resp, err := doTracedUpstreamRequest(client, req, account, proxyURL)
 		if err != nil {
 			if shouldRecyclePooledClient(err) {
 				recyclePooledClient(account, proxyURL)
 			}
-			return nil, ErrUpstream(0, "请求上游失败", err)
+			wrapped := ErrUpstream(0, "请求上游失败", err)
+			telemetryAttempt.observeResult(nil, wrapped)
+			return nil, wrapped
 		}
+		telemetryAttempt.observeResult(resp, nil)
 		return resp, nil
 	}
 

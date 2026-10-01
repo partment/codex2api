@@ -5,6 +5,8 @@ import (
 	"context"
 	"io"
 	"net/http"
+
+	"github.com/codex2api/auth"
 )
 
 // sendCodexTelemetryJob 使用账号网络配置发送一批遥测数据。
@@ -54,10 +56,17 @@ func sendCodexTelemetryJob(job codexTelemetryJob) error {
 // 重定向目标。与 grok_media.go / claude_api_key.go 的既有做法一致。
 func codexTelemetryHTTPClient(base *http.Client) *http.Client {
 	if base == nil {
-		return &http.Client{CheckRedirect: codexTelemetryRejectRedirect}
+		base = &http.Client{}
 	}
 	clone := *base
 	clone.CheckRedirect = codexTelemetryRejectRedirect
+	transport := clone.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	// 池化 client 已带通用 codex 日志层。先剥掉再加 telemetry 专用 tag，
+	// 避免 OUTBOUND_HEADER_LOG 开启时同一请求重复记录。
+	clone.Transport = auth.WrapOutboundHeaderLog("codex-telemetry", auth.UnwrapOutboundHeaderLog(transport))
 	return &clone
 }
 
