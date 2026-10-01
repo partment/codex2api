@@ -62,7 +62,7 @@ func TestEvictExpiredUTLSAuthClientClosesHealthyIdleConnection(t *testing.T) {
 	}
 
 	entry := &utlsAuthPoolEntry{
-		client: &http.Client{Transport: transport},
+		client: &http.Client{Transport: WrapOutboundHeaderLog("auth-utls", transport)},
 	}
 	entry.lastUsed.Store(time.Now().Add(-utlsAuthClientPoolTTL - time.Minute).UnixNano())
 	utlsAuthClientPool.Store(poolKey, entry)

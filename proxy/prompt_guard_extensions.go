@@ -16,6 +16,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/codex2api/auth"
 	"github.com/codex2api/security/promptfilter"
 	"github.com/gin-gonic/gin"
 )
@@ -293,6 +294,7 @@ func (h *Handler) enrichPromptGuardAttachments(ctx context.Context, cfg promptfi
 	if key := strings.TrimSpace(os.Getenv("PROMPT_FILTER_ATTACHMENT_API_KEY")); key != "" {
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
+	auth.LogOutboundHTTPRequest("prompt-filter-attachment", req)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		h.recordPromptExtensionFailure(ctx, breakerKey, attachmentCfg.CircuitBreakerFailures, attachmentCfg.CircuitBreakerSeconds)

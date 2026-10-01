@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
 )
 
@@ -65,6 +66,7 @@ func FetchLatestCodexCLIVersion(ctx context.Context, proxyURL string) (string, e
 
 	client, closeClient := newVersionSyncClient(endpoint, GithubProxyOrDefault(endpoint, proxyURL), 20*time.Second)
 	defer closeClient()
+	client.Transport = auth.WrapOutboundHeaderLog("codex-version-sync", client.Transport)
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("codex releases request: %w", err)

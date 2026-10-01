@@ -313,11 +313,9 @@ func evictExpiredUTLSAuthClients() {
 	utlsAuthClientPool.Range(func(key, value any) bool {
 		entry := value.(*utlsAuthPoolEntry)
 		if entry.lastUsed.Load() < cutoff && utlsAuthClientPool.CompareAndDelete(key, value) {
-			if ut, ok := entry.client.Transport.(*utlsAuthRoundTripper); ok {
-				// 只关闭无在途 stream 的连接，避免清理与刚开始的认证请求
-				// 竞态时误杀请求；漏过的连接由 IdleConnTimeout 最终回收。
-				ut.CloseIdleConnections()
-			}
+			// Close only idle connections, including through the logging wrapper.
+			// Active authentication streams must survive pool eviction.
+			entry.client.CloseIdleConnections()
 		}
 		return true
 	})
@@ -334,7 +332,7 @@ func buildUTLSHTTPClient(proxyURL string) *http.Client {
 
 	transport := newUTLSAuthTransport(proxyURL)
 	client := &http.Client{
-		Transport: transport,
+		Transport: WrapOutboundHeaderLog("auth-utls", transport),
 		Timeout:   30 * time.Second,
 	}
 
