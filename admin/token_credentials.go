@@ -336,11 +336,10 @@ func accountFromCredentialSeed(id int64, proxyURL string, seed tokenCredentialSe
 		SubscriptionExpiresAt: seed.subscriptionExpiresAt,
 	}
 	if pct, ok := parseSeedUsagePercent(seed.codex7DUsedPercent); ok {
-		updatedAt := parseSeedRFC3339(seed.codexUsageUpdatedAt)
-		account.SetUsageSnapshot(pct, updatedAt)
-		if resetAt := parseSeedRFC3339(seed.codex7DResetAt); !resetAt.IsZero() {
-			account.SetReset7dAt(resetAt)
-		}
+		account.SetUsageSnapshot7d(auth.UsageSnapshot7d{
+			Percent: pct, Valid: true, UpdatedAt: parseSeedRFC3339(seed.codexUsageUpdatedAt),
+			ResetAt: parseSeedRFC3339(seed.codex7DResetAt),
+		})
 	}
 	if pct, ok := parseSeedUsagePercent(seed.codex5HUsedPercent); ok {
 		account.SetUsageSnapshot5hAt(pct, parseSeedRFC3339(seed.codex5HResetAt), parseSeedRFC3339(seed.codex5HUsageUpdatedAt))
