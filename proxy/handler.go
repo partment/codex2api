@@ -6022,14 +6022,14 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 	retryExclusions := newRetryAccountExclusions()
 	invalidEncryptedContentRetried := false
 	relayContinuationAttempted := false
+	var wsHTTPFallback websocketHTTPFallbackState
 
 	dispatchPolicy := dispatchPolicyForModel(effectiveModel)
 	for attempt := 0; ; attempt++ {
-		var account *auth.Account
-		var stickyProxyURL string
 		var affinityGuard auth.SessionAffinityGuard
 		var selectionErr error
-		if attempt == 0 && compactionAffinity.Known {
+		account, stickyProxyURL, retainedHTTPFallback := wsHTTPFallback.Take()
+		if !retainedHTTPFallback && attempt == 0 && compactionAffinity.Known {
 			account = h.store.TakePreferredAccountWithDispatch(compactionAffinity.PreferredAccountID, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
 			if account != nil {
 				stickyProxyURL = account.GetProxyURL()
@@ -6096,9 +6096,11 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		h.AcquireAPIKeyScopeConcurrency(c, account)
 		start := time.Now()
 		proxyURL := h.resolveProxyForAttempt(account, stickyProxyURL)
-		if !bindContinuousRetrySessionAffinityWithGuard(c.Request.Context(), h.store, affinityKey, account, proxyURL, affinityGuard) {
-			h.store.Release(account)
-			return
+		if !retainedHTTPFallback {
+			if !bindContinuousRetrySessionAffinityWithGuard(c.Request.Context(), h.store, affinityKey, account, proxyURL, affinityGuard) {
+				h.store.Release(account)
+				return
+			}
 		}
 		attemptEffectiveModel := effectiveModel
 		attemptLogEffectiveModel := logEffectiveModel
@@ -6358,9 +6360,21 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		// 的默认隔离：压缩本身是对同一会话的延续，需要稳定的 prompt_cache_key 维持缓存连续性。
 		upstreamSessionID := IsolateCodexSessionID(apiKeyID, sessionIdentity.upstreamSeed)
 		// compact_via_responses_enabled：上游已下线 /responses/compact 专用端点（404），
-		// 开启后官方账号改走 /responses + compaction_trigger 的 body-signal 形态
-		// （强制 HTTP SSE），成功后聚合回 compact 的一次性 JSON。
+		// 开启后官方账号改走 /responses + compaction_trigger 的 body-signal 形态，
+		// 成功后聚合回 compact 的一次性 JSON。强制 WS 开启时优先走 WS；已知请求
+		// 过大或收到 close 1009 时，与普通 Responses 路径一致降级到 HTTP SSE。
 		compactViaResponses := CurrentRuntimeSettings().CompactViaResponses
+		compactRequestBody := codexBody
+		if compactViaResponses {
+			compactRequestBody = appendCompactionTriggerToResponsesBody(codexBody)
+		}
+		useWebsocket := compactViaResponses && h.shouldUseWebsocketForHTTP() && !wsHTTPFallback.ForceHTTP() && !account.IsCodexAgentIdentity()
+		if useWebsocket && globalWSSizeRouter.PreferHTTP(len(compactRequestBody)) {
+			useWebsocket = false
+			if attempt == 0 {
+				log.Printf("[WS] compact 请求体 %dKB 达到已学习的 1009 体积阈值，直接走 HTTP 上游", len(compactRequestBody)/1024)
+			}
+		}
 		upstreamEndpointLabel := "/v1/responses/compact"
 		var resp *http.Response
 		var reqErr error
@@ -6368,7 +6382,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		if compactViaResponses {
 			upstreamEndpointLabel = "/v1/responses"
 			resp, reqErr = executeHTTPWithContinuousRetryKeepalive(c.Request.Context(), func() (*http.Response, error) {
-				return ExecuteRequest(c.Request.Context(), account, appendCompactionTriggerToResponsesBody(codexBody), upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders, false)
+				return ExecuteRequest(c.Request.Context(), account, compactRequestBody, upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders, useWebsocket)
 			})
 		} else {
 			resp, reqErr = executeHTTPWithContinuousRetryKeepalive(c.Request.Context(), func() (*http.Response, error) {
@@ -6383,8 +6397,16 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 				sendAPIKeyModelRequestQuotaError(c, reqErr)
 				return
 			}
+			kind := classifyTransportFailure(reqErr)
+			if useWebsocket && kind == upstreamErrorKindMessageTooBig {
+				wsElapsed := time.Since(start)
+				globalWSSizeRouter.RecordMessageTooBig(len(compactRequestBody))
+				wsHTTPFallback.Retain(account, proxyURL, wsElapsed, websocketMessageTooBigSource(reqErr.Error()))
+				log.Printf("compact 上游 WebSocket 1009，保留账号租约并降级 HTTP (fallback_id=%s, source=%s, attempt=%d, account=%d, ws_elapsed_ms=%d): %v", wsHTTPFallback.ID(), wsHTTPFallback.Source(), attempt+1, account.ID(), wsElapsed.Milliseconds(), reqErr)
+				continue
+			}
 			retryable := isRetryableRequestErrorForContext(c.Request.Context(), reqErr, continuousRetryPolicy)
-			if kind := classifyTransportFailure(reqErr); retryable && shouldPenalizeTransportKind(kind) {
+			if retryable && shouldPenalizeTransportKind(kind) {
 				h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
 			}
 			h.store.Release(account)
@@ -6449,7 +6471,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 
 			logUpstreamError("/v1/responses/compact", resp.StatusCode, logModel, account.ID(), errBody)
 			promptPolicyIncidentID := acceptedPromptPolicyIncidentID(h.logUpstreamCyberPolicy(c, "/v1/responses/compact", logModel, errBody, upstreamCyberPolicyAttempt{
-				Transport: "http", StatusCode: resp.StatusCode, AccountID: account.ID(), AttemptIndex: attempt + 1,
+				Transport: upstreamPromptPolicyTransport(compactViaResponses, useWebsocket), StatusCode: resp.StatusCode, AccountID: account.ID(), AttemptIndex: attempt + 1,
 			}))
 			decision := h.applyCooldownForModel(account, resp.StatusCode, errBody, resp, effectiveModel)
 			shouldRetry := shouldRetryHTTPStatus(resp.StatusCode, errBody, &generalRetries, &rateLimitRetries, maxRetries, effectiveRateLimitRetries, continuousRetryPolicy)
@@ -6464,6 +6486,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 				ReasoningEffort:        reasoningEffort,
 				InboundEndpoint:        "/v1/responses/compact",
 				UpstreamEndpoint:       upstreamEndpointLabel,
+				ViaWebsocket:           useWebsocket,
 				ServiceTier:            usageTiers.ServiceTier,
 				RequestedServiceTier:   usageTiers.RequestedServiceTier,
 				ActualServiceTier:      usageTiers.ActualServiceTier,
@@ -6495,7 +6518,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		var readErr error
 		var compactFailedPayload []byte
 		if compactViaResponses {
-			respBody, compactFailedPayload, readErr = collectCompactResponsesSSEWithContinuousRetryKeepalive(c.Request.Context(), resp.Body)
+			respBody, compactFailedPayload, readErr = collectCompactResponsesSSEWithContinuousRetryKeepalive(c.Request.Context(), resp.Body, compactRequestBody)
 		} else {
 			respBody, readErr = readAllWithContinuousRetryKeepalive(c.Request.Context(), resp.Body)
 		}
@@ -6507,19 +6530,27 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 			if kind == "" {
 				kind = "transport"
 			}
-			if retryable && shouldPenalizeTransportKind(kind) {
-				h.store.ReportRequestFailure(account, kind, time.Duration(totalDuration)*time.Millisecond)
+			fallbackToHTTP := useWebsocket && kind == upstreamErrorKindMessageTooBig
+			if fallbackToHTTP {
+				wsElapsed := time.Since(start)
+				globalWSSizeRouter.RecordMessageTooBig(len(compactRequestBody))
+				wsHTTPFallback.Retain(account, proxyURL, wsElapsed, websocketMessageTooBigSource(readErr.Error()))
+				log.Printf("compact 上游 WebSocket 1009，保留账号租约并降级 HTTP (fallback_id=%s, source=%s, attempt=%d, account=%d, ws_elapsed_ms=%d): %v", wsHTTPFallback.ID(), wsHTTPFallback.Source(), attempt+1, account.ID(), wsElapsed.Milliseconds(), readErr)
+			} else {
+				if retryable && shouldPenalizeTransportKind(kind) {
+					h.store.ReportRequestFailure(account, kind, time.Duration(totalDuration)*time.Millisecond)
+				}
+				SyncCodexUsageState(h.store, account, resp)
+				h.store.Release(account)
+				if retryable {
+					h.store.UnbindSessionAffinity(affinityKey, account.ID())
+					retryExclusions.MarkRequestFailure(account.ID(), readErr, maxRetries)
+				}
 			}
-			SyncCodexUsageState(h.store, account, resp)
-			h.store.Release(account)
-			if retryable {
-				h.store.UnbindSessionAffinity(affinityKey, account.ID())
-				retryExclusions.MarkRequestFailure(account.ID(), readErr, maxRetries)
-			}
-			if !retryable && c.Request.Context().Err() != nil {
+			if !fallbackToHTTP && !retryable && c.Request.Context().Err() != nil {
 				return
 			}
-			shouldRetry := retryable && shouldRetryRequestError(readErr, &generalRetries, maxRetries, continuousRetryPolicy)
+			shouldRetry := fallbackToHTTP || (retryable && shouldRetryRequestError(readErr, &generalRetries, maxRetries, continuousRetryPolicy))
 			usageTiers := resolveUsageServiceTiers("", serviceTier)
 			h.logUsageForRequest(c, &database.UsageLogInput{
 				AccountID:            account.ID(),
@@ -6531,6 +6562,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 				ReasoningEffort:      reasoningEffort,
 				InboundEndpoint:      "/v1/responses/compact",
 				UpstreamEndpoint:     upstreamEndpointLabel,
+				ViaWebsocket:         useWebsocket,
 				ServiceTier:          usageTiers.ServiceTier,
 				RequestedServiceTier: usageTiers.RequestedServiceTier,
 				ActualServiceTier:    usageTiers.ActualServiceTier,
@@ -6541,6 +6573,9 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 				ErrorMessage:         fmt.Sprintf("上游响应读取失败: %v", readErr),
 			})
 			log.Printf("compact 上游响应读取失败 (attempt %d): %v", attempt+1, readErr)
+			if fallbackToHTTP {
+				continue
+			}
 			if shouldRetry {
 				rememberContinuousRetryRequestFailure(c.Request.Context(), readErr)
 				lastStatusCode = http.StatusBadGateway
@@ -6635,7 +6670,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 
 			logUpstreamError("/v1/responses/compact", failStatus, logModel, account.ID(), errBody)
 			promptPolicyIncidentID := acceptedPromptPolicyIncidentID(h.logUpstreamCyberPolicy(c, "/v1/responses/compact", logModel, errBody, upstreamCyberPolicyAttempt{
-				Transport: "http", StatusCode: failStatus, AccountID: account.ID(), AttemptIndex: attempt + 1,
+				Transport: upstreamPromptPolicyTransport(true, useWebsocket), StatusCode: failStatus, AccountID: account.ID(), AttemptIndex: attempt + 1,
 			}))
 			usageTiers := resolveUsageServiceTiers("", serviceTier)
 			h.logUsageForRequest(c, &database.UsageLogInput{
@@ -6648,6 +6683,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 				ReasoningEffort:        reasoningEffort,
 				InboundEndpoint:        "/v1/responses/compact",
 				UpstreamEndpoint:       upstreamEndpointLabel,
+				ViaWebsocket:           useWebsocket,
 				ServiceTier:            usageTiers.ServiceTier,
 				RequestedServiceTier:   usageTiers.RequestedServiceTier,
 				ActualServiceTier:      usageTiers.ActualServiceTier,
@@ -6716,6 +6752,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 			ReasoningEffort:      reasoningEffort,
 			InboundEndpoint:      "/v1/responses/compact",
 			UpstreamEndpoint:     upstreamEndpointLabel,
+			ViaWebsocket:         useWebsocket,
 			ServiceTier:          usageTiers.ServiceTier,
 			RequestedServiceTier: usageTiers.RequestedServiceTier,
 			ActualServiceTier:    usageTiers.ActualServiceTier,
