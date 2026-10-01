@@ -24,6 +24,7 @@ type codexMetricDescriptor struct {
 // 观测各自成点、直方图分布不丢失。
 type codexMetricPoint struct {
 	descriptor codexMetricDescriptor
+	profile    codexTelemetryProfile
 	attributes map[string]string
 	// sum 指标（counter）：周期内累加值。
 	sumValue float64
@@ -164,10 +165,10 @@ func codexTelemetryStatsigAllowed(name string) bool {
 }
 
 // newCodexMetricPoint 用一次观测初始化聚合点。
-func newCodexMetricPoint(descriptor codexMetricDescriptor, attributes map[string]string, value float64) *codexMetricPoint {
+func newCodexMetricPoint(profile codexTelemetryProfile, descriptor codexMetricDescriptor, attributes map[string]string, value float64) *codexMetricPoint {
 	bounds := codexBoundsFor(descriptor)
 	point := &codexMetricPoint{
-		descriptor: descriptor, attributes: attributes, min: value, max: value,
+		descriptor: descriptor, profile: profile, attributes: attributes, min: value, max: value,
 		bucketCounts: make([]uint64, len(bounds)+1), observed: true,
 	}
 	switch descriptor.kind {
@@ -189,10 +190,12 @@ func recordCodexMetricPoint(state *codexMetricState, profile codexTelemetryProfi
 		return
 	}
 	attributes := codexMetricAttributeMap(profile, descriptor)
-	key := name + "\x00" + codexMetricAttributeSignature(attributes)
+	resource := codexResourceAttributes(profile)
+	encodedResource, _ := json.Marshal(resource)
+	key := name + "\x00" + string(encodedResource) + "\x00" + codexMetricAttributeSignature(attributes)
 	point := state.points[key]
 	if point == nil {
-		state.points[key] = newCodexMetricPoint(descriptor, attributes, value)
+		state.points[key] = newCodexMetricPoint(profile, descriptor, attributes, value)
 		return
 	}
 	switch descriptor.kind {
@@ -252,7 +255,7 @@ func (m *codexTelemetryManager) enqueueStartupMetrics(profile codexTelemetryProf
 			continue
 		}
 		attributes := codexMetricAttributeMap(profile, descriptor)
-		points = append(points, newCodexMetricPoint(descriptor, attributes, codexStartupMetricValue(profile, descriptor)))
+		points = append(points, newCodexMetricPoint(profile, descriptor, attributes, codexStartupMetricValue(profile, descriptor)))
 	}
 	m.enqueueMetrics(profile.client, buildCodexMetricsPayload(profile, started, points))
 	if timing {
@@ -337,20 +340,46 @@ func (m *codexTelemetryManager) enqueueMetrics(client codexTelemetryClient, body
 	}
 }
 
-// buildCodexMetricsPayload 将聚合点编码为 OTLP JSON 请求体。
-func buildCodexMetricsPayload(profile codexTelemetryProfile, started time.Time, points []*codexMetricPoint) []byte {
-	metrics := make([]any, 0, len(points))
+// buildCodexMetricsPayload 将聚合点按完整 resource identity 分组后编码为 OTLP JSON。
+func buildCodexMetricsPayload(fallbackProfile codexTelemetryProfile, started time.Time, points []*codexMetricPoint) []byte {
+	type resourceGroup struct {
+		attributes []any
+		metrics    []any
+	}
+	groups := make(map[string]*resourceGroup)
 	for _, point := range points {
 		if !codexTelemetryStatsigAllowed(point.descriptor.name) {
 			continue
 		}
-		metrics = append(metrics, codexOTLPMetricPoint(started, point))
+		profile := point.profile
+		if profile.client.userAgent == "" {
+			profile = fallbackProfile
+		}
+		attributes := codexResourceAttributes(profile)
+		encoded, _ := json.Marshal(attributes)
+		key := string(encoded)
+		group := groups[key]
+		if group == nil {
+			group = &resourceGroup{attributes: attributes}
+			groups[key] = group
+		}
+		group.metrics = append(group.metrics, codexOTLPMetricPoint(started, point))
 	}
-	resource := map[string]any{"attributes": codexResourceAttributes(profile), "droppedAttributesCount": 0, "entityRefs": []any{}}
-	scope := map[string]any{"name": "codex", "version": "", "attributes": []any{}, "droppedAttributesCount": 0}
-	scopeMetrics := map[string]any{"scope": scope, "metrics": metrics, "schemaUrl": ""}
-	payload := map[string]any{"resourceMetrics": []any{map[string]any{"resource": resource, "scopeMetrics": []any{scopeMetrics}, "schemaUrl": ""}}}
-	body, _ := json.Marshal(payload)
+
+	keys := make([]string, 0, len(groups))
+	for key := range groups {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	resourceMetrics := make([]any, 0, len(keys))
+	for _, key := range keys {
+		group := groups[key]
+		resource := map[string]any{"attributes": group.attributes, "droppedAttributesCount": 0, "entityRefs": []any{}}
+		scope := map[string]any{"name": "codex", "version": "", "attributes": []any{}, "droppedAttributesCount": 0}
+		scopeMetrics := map[string]any{"scope": scope, "metrics": group.metrics, "schemaUrl": ""}
+		resourceMetrics = append(resourceMetrics, map[string]any{"resource": resource, "scopeMetrics": []any{scopeMetrics}, "schemaUrl": ""})
+	}
+	body, _ := json.Marshal(map[string]any{"resourceMetrics": resourceMetrics})
 	return body
 }
 

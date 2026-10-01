@@ -207,9 +207,11 @@ func codexTelemetryTimingDebug() bool {
 // codexTelemetryEnabled 合并运行时开关与部署级关闭设置。
 //
 // 运行时开关默认关闭（实验性功能，事件是模拟生成的，是否外发由部署者决定），
+// CODEX_TELEMETRY_DISABLED 的 truthy 值与 CODEX_TELEMETRY_ENABLED=false 都可作为
+// 部署级强制关闭；前者保留既有 feat/auto-fast 部署的相容性。
 // 因此测试里调用 ExecuteRequest 不会把真实令牌打到上游，不需要按二进制名特判。
 func codexTelemetryEnabled() bool {
-	if !CurrentRuntimeSettings().CodexTelemetryEnabled {
+	if !CurrentRuntimeSettings().CodexTelemetryEnabled || codexTelemetryEnvTruthy("CODEX_TELEMETRY_DISABLED") {
 		return false
 	}
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("CODEX_TELEMETRY_ENABLED"))) {
@@ -217,6 +219,15 @@ func codexTelemetryEnabled() bool {
 		return false
 	default:
 		return true
+	}
+}
+
+func codexTelemetryEnvTruthy(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true", "yes", "y", "on":
+		return true
+	default:
+		return false
 	}
 }
 
