@@ -38,10 +38,10 @@ func TestContinuousRetryReplaySpillsAndRemovesTemporaryFile(t *testing.T) {
 		t.Fatal("expected replay to spill to a temporary file")
 	}
 	fileName := replay.file.Name()
-	if runtime.GOOS != "windows" {
-		if _, err := os.Stat(fileName); !errors.Is(err, os.ErrNotExist) {
-			t.Fatal("temporary file directory entry still exists after spill")
-		}
+	if _, err := os.Stat(fileName); runtime.GOOS != "windows" && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("temporary file directory entry still exists after spill")
+	} else if runtime.GOOS == "windows" && err != nil {
+		t.Fatalf("Windows temporary file should exist until Close: %v", err)
 	}
 	var downstream bytes.Buffer
 	if err := replay.CommitTo(&downstream, nil); err != nil {
@@ -54,7 +54,7 @@ func TestContinuousRetryReplaySpillsAndRemovesTemporaryFile(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 	if _, err := os.Stat(fileName); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("temporary file directory entry still exists after close")
+		t.Fatalf("temporary file still exists after Close: %v", err)
 	}
 	if _, err := replay.Write([]byte("late")); !errors.Is(err, errContinuousRetryReplayClosed) {
 		t.Fatalf("write after close error = %v", err)
@@ -115,6 +115,9 @@ func TestContinuousRetryReplayMapsFileErrorsWithoutPath(t *testing.T) {
 	}
 	if err := replay.Close(); !errors.Is(err, errContinuousRetryReplayStorage) {
 		t.Fatal("file close error was not mapped to the stable storage error")
+	}
+	if _, err := os.Stat(fileName); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed replay left temporary file behind: %v", err)
 	}
 }
 
