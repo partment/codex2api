@@ -74,24 +74,24 @@ type Segment struct {
 }
 
 type RequestEnvelope struct {
-	Endpoint             string      `json:"endpoint"`
-	Protocol             Protocol    `json:"protocol"`
-	Transport            Transport   `json:"transport"`
-	RequestedModel       string      `json:"requested_model,omitempty"`
-	EffectiveModel       string      `json:"effective_model,omitempty"`
-	ModelFamily          ModelFamily `json:"model_family"`
-	Segments             []Segment   `json:"segments"`
-	AdapterUnclassified  bool        `json:"adapter_unclassified,omitempty"`
+	Endpoint            string      `json:"endpoint"`
+	Protocol            Protocol    `json:"protocol"`
+	Transport           Transport   `json:"transport"`
+	RequestedModel      string      `json:"requested_model,omitempty"`
+	EffectiveModel      string      `json:"effective_model,omitempty"`
+	ModelFamily         ModelFamily `json:"model_family"`
+	Segments            []Segment   `json:"segments"`
+	AdapterUnclassified bool        `json:"adapter_unclassified,omitempty"`
 	// AdapterUnclassifiedTypes records the offending typed-payload names (bounded,
 	// deduped) so the non-punitive adapter audit can surface which future block or
 	// item type went unrecognized, instead of only flagging that one did.
 	AdapterUnclassifiedTypes []string `json:"adapter_unclassified_types,omitempty"`
-	Truncated            bool        `json:"truncated,omitempty"`
-	CurrentUserTruncated bool        `json:"current_user_truncated,omitempty"`
-	AuxiliaryTruncated   bool        `json:"auxiliary_truncated,omitempty"`
-	currentUserExactText string
-	currentUserPrecheck  *currentUserPrecheck
-	precheckIncomplete   bool
+	Truncated                bool     `json:"truncated,omitempty"`
+	CurrentUserTruncated     bool     `json:"current_user_truncated,omitempty"`
+	AuxiliaryTruncated       bool     `json:"auxiliary_truncated,omitempty"`
+	currentUserExactText     string
+	currentUserPrecheck      *currentUserPrecheck
+	precheckIncomplete       bool
 	// untrustedApprovalModel is the requested model of a structurally valid
 	// Codex auto-review request whose model is not in ApprovalReviewModels.
 	untrustedApprovalModel string
@@ -978,6 +978,11 @@ func inputItemRole(item gjson.Result) string {
 	if !item.IsObject() {
 		return ""
 	}
+	// A control item cannot impersonate a message or hide the current prompt
+	// by adding a role field. Its upstream schema is still validated separately.
+	if strings.EqualFold(strings.TrimSpace(item.Get("type").String()), "configuration_update") {
+		return ""
+	}
 	return strings.ToLower(strings.TrimSpace(item.Get("role").String()))
 }
 
@@ -1152,6 +1157,9 @@ func (b *envelopeBuilder) appendTypedInputItem(item gjson.Result, currentUser bo
 	case "compaction_trigger", "item_reference":
 		// Control/reference items carry no end-user prompt text.
 		b.appendAttachmentReferences(item, "context")
+	case "configuration_update":
+		// Reasoning controls are not prompt text and do not end a user turn.
+		return
 	case "encrypted_content":
 		// Opaque server-side encrypted continuation payload (gpt-5.6 store=false
 		// reasoning). No end-user prompt text; recognized and skipped.

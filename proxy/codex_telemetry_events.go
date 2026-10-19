@@ -59,7 +59,10 @@ func buildCodexTelemetryProfile(client codexTelemetryClient, input codexTelemetr
 		threadID = sessionID
 	}
 	turnID := firstNonEmptyString(metadata.Get("turn_id").String(), NewUpstreamSessionUUID())
-	effort := firstNonEmptyString(gjson.GetBytes(input.body, "reasoning.effort").String(), "medium")
+	effort := extractReasoningEffort(input.body)
+	if effort == "" && strings.TrimSpace(gjson.GetBytes(input.body, "previous_response_id").String()) == "" {
+		effort = "medium"
+	}
 	return codexTelemetryProfile{
 		client: client, sessionID: sessionID, threadID: threadID, turnID: turnID,
 		rootTurnID: firstNonEmptyString(metadata.Get("root_turn_id").String(), turnID),
@@ -174,6 +177,9 @@ func codexTerminalEvents(profile codexTelemetryProfile, result codexTelemetryTer
 func codexMainTurnEvent(profile codexTelemetryProfile, result codexTelemetryTerminal) codexAnalyticsEvent {
 	now := time.Now()
 	params := codexTurnEventBase(profile, codexTurnSpec{profile.threadID, profile.turnID, profile.model, profile.effort})
+	if profile.effort == "" {
+		delete(params, "reasoning_effort")
+	}
 	response := codexTerminalResponse(result.body)
 	params["approval_policy"] = firstNonEmptyString(profile.turnMetadata.Get("approval_policy").String(), "on-request")
 	params["approvals_reviewer"], params["completed_at"] = "auto_review", now.Unix()
