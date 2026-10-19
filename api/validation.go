@@ -676,6 +676,7 @@ func ValidateInput() ValidationRule {
 			// multi-agent 会话的代理间消息历史项,续会话时随 input 回放,上游原生接受
 			"agent_message":           true,
 			"reasoning":               true,
+			"configuration_update":    true,
 			"function_call":           true,
 			"function_call_output":    true,
 			"tool_call":               true,
@@ -738,6 +739,22 @@ func ValidateInput() ValidationRule {
 					Code:    "invalid_input_type",
 				}
 				return false
+			}
+			if itemType == "configuration_update" {
+				// Positional effort updates must remain in input; supported effort
+				// values are model-specific and are validated by the upstream.
+				reasoning := item.Get("reasoning")
+				reasoningPath := fmt.Sprintf("%s.%d.reasoning", path, idx)
+				for _, rule := range []ValidationRule{Required(), TypeObject()} {
+					if verr = rule(reasoning, reasoningPath); verr != nil {
+						return false
+					}
+				}
+				for _, rule := range []ValidationRule{Required(), TypeString(), MaxLength(64)} {
+					if verr = rule(reasoning.Get("effort"), reasoningPath+".effort"); verr != nil {
+						return false
+					}
+				}
 			}
 			idx++
 			return true

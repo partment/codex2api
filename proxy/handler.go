@@ -2028,18 +2028,29 @@ func gjsonResultIsCompactionHistory(result gjson.Result) bool {
 	return strings.EqualFold(itemType, "compaction") || strings.EqualFold(itemType, "context_compaction")
 }
 
-// extractReasoningEffort 从请求体提取推理强度
-// 支持 reasoning.effort（Responses API）和 reasoning_effort（Chat Completions API）
+// extractReasoningEffort reads the effective effort without rewriting the stable
+// request-level base used for prompt caching. Empty means unknown/unspecified.
 func extractReasoningEffort(body []byte) string {
-	// Responses API: reasoning.effort
+	var effective string
+	// Select only the control values rather than copying the entire input history.
+	gjson.GetBytes(body, `input.#(type=="configuration_update")#.reasoning.effort`).ForEach(func(_, effort gjson.Result) bool {
+		if effort.Type == gjson.String && strings.TrimSpace(effort.String()) != "" {
+			effective = effort.String()
+		}
+		return true
+	})
+	if effective != "" {
+		return effective
+	}
+	// A native continuation may inherit an update absent from this payload.
+	// Do not report the request-level cache baseline as its effective effort.
+	if strings.TrimSpace(gjson.GetBytes(body, "previous_response_id").String()) != "" {
+		return ""
+	}
 	if effort := gjson.GetBytes(body, "reasoning.effort").String(); effort != "" {
 		return effort
 	}
-	// Chat Completions API: reasoning_effort
-	if effort := gjson.GetBytes(body, "reasoning_effort").String(); effort != "" {
-		return effort
-	}
-	return ""
+	return gjson.GetBytes(body, "reasoning_effort").String()
 }
 
 // responsesPhaseTimingHeader /v1/responses 请求准备阶段分段耗时的响应头。
