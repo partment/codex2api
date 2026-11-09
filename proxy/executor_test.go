@@ -456,6 +456,60 @@ func TestApplyCodexRequestHeadersUsesSessionIDWithoutConversationID(t *testing.T
 	}
 }
 
+func TestCodexClientIdentityForceOverridesStabilizedProfile(t *testing.T) {
+	previous := CurrentRuntimeSettings()
+	t.Cleanup(func() { ApplyRuntimeSettings(previous) })
+
+	account := &auth.Account{DBID: 42, AccountID: "acct-42"}
+	cfg := DeviceProfileConfigFromEnv(nil)
+	cachedKey := t.Name() + "/cached"
+	freshKey := t.Name() + "/fresh"
+	t.Cleanup(func() {
+		deviceProfileCacheMu.Lock()
+		defer deviceProfileCacheMu.Unlock()
+		delete(deviceProfileCache, deviceProfileCacheKey(account, cachedKey))
+		delete(deviceProfileCache, deviceProfileCacheKey(account, freshKey))
+	})
+
+	cachedUA := "opencode/1.19.5 ai-sdk/provider"
+	if got := ResolveDeviceProfile(account, cachedKey, http.Header{"User-Agent": {cachedUA}}, cfg).UserAgent; got != cachedUA {
+		t.Fatalf("cached User-Agent = %q, want %q", got, cachedUA)
+	}
+
+	settings := previous
+	settings.ClientCompatMode = ClientCompatModeForce
+	settings.CodexUserAgentConfig = `{"client_name":"codex-tui","client_version":"0.167.0","os_name":"Windows","os_version":"10.0.26200","arch":"x86_64","terminal":"WindowsTerminal"}`
+	ApplyRuntimeSettings(settings)
+	downstream := http.Header{"User-Agent": {"pi/1.5.0 (win32; node/v25.2.1; x64)"}}
+	wantUA := "codex-tui/0.167.0 (Windows 10.0.26200; x86_64) WindowsTerminal (codex-tui; 0.167.0)"
+	for _, key := range []string{cachedKey, freshKey} {
+		ctx := withUserAgentAudit(context.Background())
+		req := httptest.NewRequest(http.MethodPost, "https://example.com/v1/responses", nil).WithContext(ctx)
+		if err := applyCodexRequestHeaders(req, account, "token", "", key, cfg, downstream); err != nil {
+			t.Fatal(err)
+		}
+		if got := req.Header.Get("User-Agent"); got != wantUA {
+			t.Errorf("key %q: User-Agent = %q, want %q", key, got, wantUA)
+		}
+		if got := req.Header.Get("Originator"); got != "codex-tui" {
+			t.Errorf("key %q: Originator = %q, want codex-tui", key, got)
+		}
+		if got := req.Header.Get("Version"); got != "0.167.0" {
+			t.Errorf("key %q: Version = %q, want 0.167.0", key, got)
+		}
+		if got, known := upstreamUserAgentAudit(ctx); !known || got != wantUA {
+			t.Errorf("key %q: audited User-Agent = %q, known = %v", key, got, known)
+		}
+	}
+
+	settings.ClientCompatMode = ClientCompatModePreserve
+	ApplyRuntimeSettings(settings)
+	identity, err := ResolveCodexOutboundClientIdentity(CodexClientIdentityInput{Account: account, APIKey: cachedKey, DeviceConfig: cfg, Headers: downstream})
+	if err != nil || identity.UserAgent != cachedUA {
+		t.Fatalf("preserve identity = %+v, error = %v; want cached %q", identity, err, cachedUA)
+	}
+}
+
 func TestApplyCodexRequestHeadersAppliesAccountCustomHeadersLast(t *testing.T) {
 	req, err := http.NewRequest(http.MethodPost, "https://example.com/v1/responses", nil)
 	if err != nil {

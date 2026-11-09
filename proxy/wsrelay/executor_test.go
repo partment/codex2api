@@ -668,6 +668,37 @@ func TestPrepareWebsocketHeadersConvergesForwardedClientRequestID(t *testing.T) 
 	}
 }
 
+func TestPrepareWebsocketHeadersForceOverridesStabilizedProfile(t *testing.T) {
+	t.Setenv("CODEX_WS_SEND_USER_AGENT", "true")
+	previous := proxy.CurrentRuntimeSettings()
+	t.Cleanup(func() { proxy.ApplyRuntimeSettings(previous) })
+
+	account := &auth.Account{DBID: 42, AccountID: "42"}
+	cfg := proxy.DeviceProfileConfigFromEnv(nil)
+	apiKey := t.Name()
+	proxy.ResolveDeviceProfile(account, apiKey, http.Header{"User-Agent": {"opencode/1.19.5 ai-sdk/provider"}}, cfg)
+	wantUA := "Codex Desktop/0.167.0 (Windows 10.0.26200; x86_64) unknown (Codex Desktop; 0.167.0)"
+	settings := previous
+	settings.ClientCompatMode = proxy.ClientCompatModeForce
+	settings.CodexUserAgentConfig = `{"raw_user_agent":"` + wantUA + `"}`
+	proxy.ApplyRuntimeSettings(settings)
+
+	input := http.Header{"User-Agent": {"pi/1.5.0 (win32; node/v25.2.1; x64)"}}
+	headers, err := NewExecutor().prepareWebsocketHeadersChecked(context.Background(), "token", account, "42", "session", apiKey, cfg, input, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := headers.Get("User-Agent"); got != wantUA {
+		t.Errorf("User-Agent = %q, want %q", got, wantUA)
+	}
+	if got := headers.Get("Originator"); got != "Codex Desktop" {
+		t.Errorf("Originator = %q, want Codex Desktop", got)
+	}
+	if got := headers.Get("Version"); got != "0.167.0" {
+		t.Errorf("Version = %q, want 0.167.0", got)
+	}
+}
+
 func TestPrepareWebsocketHeadersGeneratedDesktopClientSendsMatchingOriginator(t *testing.T) {
 	// issue #653：WS 握手与 HTTP 路径同规则，生成 UA 时 Originator 跟随生成的客户端前缀。
 	t.Setenv("CODEX_WS_SEND_USER_AGENT", "true")

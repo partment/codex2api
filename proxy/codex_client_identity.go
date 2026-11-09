@@ -23,12 +23,13 @@ type CodexOutboundClientIdentity struct {
 
 // ResolveCodexOutboundClientIdentity 将版本不可用错误传到出站前的调用者。
 func ResolveCodexOutboundClientIdentity(input CodexClientIdentityInput) (CodexOutboundClientIdentity, error) {
-	if IsDeviceProfileStabilizationEnabled(input.DeviceConfig) {
+	settings := CurrentRuntimeSettings()
+	// Force simulation must take precedence over the cached device profile.
+	if IsDeviceProfileStabilizationEnabled(input.DeviceConfig) && settings.ClientCompatMode != ClientCompatModeForce {
 		return codexDeviceClientIdentity(input), nil
 	}
 	userAgent := strings.TrimSpace(input.Headers.Get("User-Agent"))
 	originator := strings.TrimSpace(input.Headers.Get("Originator"))
-	settings := CurrentRuntimeSettings()
 	if shouldGenerateCodexClientHeaders(settings, userAgent, originator) {
 		ua, version, err := generatedCodexClientHeadersChecked(input.Account, settings)
 		return CodexOutboundClientIdentity{UserAgent: ua, Version: version, Generated: true}, err
